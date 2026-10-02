@@ -95,15 +95,18 @@ const CFG = {
     maxHp: 1350, maxCe: 130, ceRegen: 8.5, speed: 276, r: 22,
     atkDmg: 34, atkCd: 0.42, atkRange: 68,
     reverseCost: 35, reverseHeal: 200, reverseCd: 8, reverseThreshold: 0.6,
-    /* 神槌：短距离突进 + 高伤（30 咒力 / 70 伤害） */
-    shinuchiCost: 30, shinuchiCd: 9, shinuchiDmg: 70, shinuchiDash: 260, shinuchiKb: 1000,
-    /* 死刑宣告：范围内目标 15 秒内受到伤害 +50% */
-    sentenceCost: 35, sentenceCd: 14, sentenceRange: 220, sentenceDuration: 15, sentenceAmp: 0.5,
+    /* 神槌：追击式突进（够得着就贴身）+ 高伤 */
+    shinuchiCost: 30, shinuchiCd: 7, shinuchiDmg: 70, shinuchiDash: 480, shinuchiKb: 900,
+    /* 死刑宣告：范围内目标 15 秒内受到伤害 +50%、移速 -25% */
+    sentenceCost: 35, sentenceCd: 14, sentenceRange: 320, sentenceDuration: 15, sentenceAmp: 0.5,
+    sentenceSlow: 0.25,    /* 被宣告者移速 -25% */
+    chaseSpeedMul: 1.20,   /* 追诉：场上存在被宣告目标时自身移速 +20% */
+    domainPull: 300,       /* 拘传：领域内敌方被拽向法庭中央（px/s） */
     domainCost: 60, domainCd: 36,
     /* 诛伏赐死：领域内敌人禁用一切主动术式（除普攻） */
     domainName: '诛伏赐死',
     domainBaseR: 330, domainOpenTime: 0.5, domainGrowRate: 30,
-    domainMaxR: 700, domainDuration: 7.0, domainDps: 0,
+    domainMaxR: 820, domainDuration: 11.0, domainDps: 0,
     domainSeal: 10,        /* 进入领域的敌人 10 秒内无法使用任何主动术式 */
     domainSpeedMul: 1.30,  /* 领域内自身移速 +30% */
     domainDR: 0.30,        /* 领域内自身受到伤害 -30% */
@@ -367,12 +370,12 @@ const CHAR_INFO = {
     title: '日车宽见',
     stats: 'HP 1350 · 咒力 130 · 速度 276 · 法槌 34',
     skills: [
-      ['法槌', 'J · 近战挥槌（范围 68）'],
-      ['神槌', 'Q · 70 咒力 · 短距突进 260px + 40 伤害并击退'],
-      ['死刑宣告', 'E · 35 咒力 · 220 范围内目标 15 秒内受到伤害 +50%'],
+      ['法槌', 'J · 近战挥槌 34 伤害（触及约 114）'],
+      ['神槌', 'Q · 30 咒力 · 追击突进：够得到就贴身（最长 480）+ 70 伤害击退'],
+      ['死刑宣告', 'E · 35 咒力 · 320 范围：目标 15 秒内受伤 +50%、移速 −25%'],
       ['反转术式', 'H · 35 咒力 · 回复 200 生命'],
-      ['诛伏赐死', '空格 · 领域：进入者 10 秒内禁用所有主动术式（含领域/反转）'],
-      ['审判', '领域内自身移速 +30%、受到伤害 −30%'],
+      ['诛伏赐死', '空格 · 领域：进入者 10 秒禁用所有主动术式，并被「拘传」拽向庭心'],
+      ['追诉 / 审判', '有人被宣告死刑时自身移速 +20%；领域内自身移速 +30%、受伤 −30%'],
     ],
   },
 };
@@ -599,10 +602,15 @@ function inOwnHigurumaDomain(f){
   return !!(f && f.domain && f.domain.type === 'higuruma' && dist(f, f.domain) < f.domain.r);
 }
 
-/* 实际移动速度（含领域加成，如诛伏赐死 +30%） */
+/* 实际移动速度（领域加成 / 追诉加成 / 死刑减速） */
 function moveSpeed(f){
   let spd = f.speed;
-  if (f.type === 'higuruma' && inOwnHigurumaDomain(f)) spd *= CFG.higuruma.domainSpeedMul;
+  if (f.sentence > 0) spd *= (1 - CFG.higuruma.sentenceSlow);   /* 被宣告死刑：减速 */
+  if (f.type === 'higuruma'){
+    if (inOwnHigurumaDomain(f)) spd *= CFG.higuruma.domainSpeedMul;
+    const foe = f === player ? enemy : player;
+    if (foe && foe.sentence > 0) spd *= CFG.higuruma.chaseSpeedMul;  /* 追诉加成 */
+  }
   return spd;
 }
 
@@ -1016,8 +1024,15 @@ function higurumaShinuchi(s, target){
   s.facing = ang;
 
   const fromX = s.x, fromY = s.y;
-  s.x = clamp(s.x + Math.cos(ang)*c.shinuchiDash, s.r, WORLD.w - s.r);
-  s.y = clamp(s.y + Math.sin(ang)*c.shinuchiDash, s.r, WORLD.h - s.r);
+  /* ★ 追击式突进：目标在射程内就落在其身前，够不到则按最大距离冲刺 */
+  let dashLen = c.shinuchiDash;
+  if (aim){
+    const contact = s.r + (aim.r || 20) + 4;
+    const gap = Math.hypot(aim.x - s.x, aim.y - s.y) - contact;
+    dashLen = clamp(gap, 0, c.shinuchiDash);
+  }
+  s.x = clamp(s.x + Math.cos(ang)*dashLen, s.r, WORLD.w - s.r);
+  s.y = clamp(s.y + Math.sin(ang)*dashLen, s.r, WORLD.h - s.r);
 
   /* 突进轨迹 */
   for (let i = 1; i <= 10; i++){
@@ -1141,7 +1156,8 @@ function damage(target, amount, silent){
   target.hitFlash = 0.14;
 
   const other = target === player ? enemy : player;
-  if (target.domain && other && other.domain) target.clashDmg += d;
+  /* ★ 「诛伏赐死」是判决而非结界，不参与领域对拼的耐久消耗（否则 0 伤害的它必输） */
+  if (target.domain && target.domain.type !== 'higuruma' && other && other.domain) target.clashDmg += d;
 
   if (!silent) addEffect({ type:'text', x:target.x+rnd(-14,14), y:target.y-42, t:0, life:0.7,
     text: Math.round(d), color:'#ffd76a', size:14 });
@@ -1302,6 +1318,9 @@ function updatePlayer(dt){
   }
 
   if (enemy.alive) p.facing = Math.atan2(enemy.y-p.y, enemy.x-p.x);
+
+  /* 审判期间一切术式失效（含无下限 / 苍拳） */
+  if (p.skillLock > 0){ p.infinity = false; p.blueFist = false; }
 
   if (p.type === 'gojo' && p.infinity){
     p.ce -= c.infDrain*dt;
@@ -1917,10 +1936,18 @@ function applyDomainEffect(owner, target, dt){
   } else if (d.type === 'higuruma'){
     /* 诛伏赐死：领域内敌人 10 秒内无法使用任何主动术式（含领域与反转术式） */
     target.skillLock = Math.max(target.skillLock || 0, CFG.higuruma.domainSeal);
+    /* ★ 拘传：把敌人拽向法庭中央，防止远程角色在领域内放风筝 */
+    const dd = dist(target, d);
+    if (d.r > 10 && dd > 6){
+      const strength = CFG.higuruma.domainPull * clamp(dd / d.r, 0.25, 1);
+      const pa = Math.atan2(d.y - target.y, d.x - target.x);
+      target.x = clamp(target.x + Math.cos(pa)*strength*dt, target.r, WORLD.w - target.r);
+      target.y = clamp(target.y + Math.sin(pa)*strength*dt, target.r, WORLD.h - target.r);
+    }
     if (!d.hitOpponent){
       d.hitOpponent = true;
       addEffect({ type:'text', x:target.x, y:target.y-70, t:0, life:1.8,
-        text:'诛伏赐死 · 10 秒内术式禁止', color:'#ffd76a', size:16 });
+        text:'诛伏赐死 · 10 秒内术式禁止 · 拘传到庭', color:'#ffd76a', size:16 });
       G.flash = 0.5;
     }
   } else {
