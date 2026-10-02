@@ -88,6 +88,25 @@ const CFG = {
     domainName: '伏魔御厨子',
     domainBaseR: 320, domainOpenTime: 0.55, domainGrowRate: 40,
     domainMaxR: 900, domainDuration: 7.0, domainDps: 22,
+  },
+  /* ★ 日车宽见 —— 审判控制型：领域内禁用敌方一切主动术式 */
+  higuruma: {
+    name: '日车宽见',
+    maxHp: 1350, maxCe: 130, ceRegen: 8.5, speed: 276, r: 22,
+    atkDmg: 34, atkCd: 0.42, atkRange: 68,
+    reverseCost: 35, reverseHeal: 200, reverseCd: 8, reverseThreshold: 0.6,
+    /* 神槌：短距离突进 + 高伤（30 咒力 / 70 伤害） */
+    shinuchiCost: 30, shinuchiCd: 9, shinuchiDmg: 70, shinuchiDash: 260, shinuchiKb: 1000,
+    /* 死刑宣告：范围内目标 15 秒内受到伤害 +50% */
+    sentenceCost: 35, sentenceCd: 14, sentenceRange: 220, sentenceDuration: 15, sentenceAmp: 0.5,
+    domainCost: 60, domainCd: 36,
+    /* 诛伏赐死：领域内敌人禁用一切主动术式（除普攻） */
+    domainName: '诛伏赐死',
+    domainBaseR: 330, domainOpenTime: 0.5, domainGrowRate: 30,
+    domainMaxR: 700, domainDuration: 7.0, domainDps: 0,
+    domainSeal: 10,        /* 进入领域的敌人 10 秒内无法使用任何主动术式 */
+    domainSpeedMul: 1.30,  /* 领域内自身移速 +30% */
+    domainDR: 0.30,        /* 领域内自身受到伤害 -30% */
   }
 };
 
@@ -123,8 +142,10 @@ function createFighter(type, x, y){
     kbx: 0, kby: 0, clashDmg: 0,
     infinity: false, blueFist: false, blueUsed: false, redUsed: false,
     brainDamaged: false,
-    cd: { blue:0, red:0, purple:0, domain:0, reverse:0, fire:0, dismantle:0, nue:0, dog:0, maho:0, tobi:0, space:0 },
+    cd: { blue:0, red:0, purple:0, domain:0, reverse:0, fire:0, dismantle:0, nue:0, dog:0, maho:0, tobi:0, space:0, shinuchi:0, sentence:0 },
     domainLock: 0,
+    skillLock: 0,   /* 审判：术式禁用剩余时间 */
+    sentence: 0,    /* 死刑：受到伤害提升剩余时间 */
     domain: null,
     mahoSummoned: false,   // 是否召唤过魔虚罗
     mahoDied: false,       // 召唤的魔虚罗是否已陨落
@@ -244,15 +265,19 @@ function startGame(pType, eType){
   updateHUD();
 }
 
+/* 角色主题色（HUD 名牌 / 选人浮层共用） */
+const NAME_COLORS = {
+  gojo: '#9fd8ff', sukunaTs: '#c9a4ff', higuruma: '#ffd76a', sukuna: '#ff8a8a',
+};
+function nameColor(type){ return NAME_COLORS[type] || '#dfe9f5'; }
+
 function updateHUDElements(){
   const pPanel = document.querySelector('.panel.player');
   const ePanel = document.querySelector('.panel.enemy');
   pPanel.querySelector('.pname').textContent = player.name;
-  pPanel.querySelector('.pname').style.color =
-    player.type === 'gojo' ? '#9fd8ff' : (player.type === 'sukunaTs' ? '#c9a4ff' : '#ff8a8a');
+  pPanel.querySelector('.pname').style.color = nameColor(player.type);
   ePanel.querySelector('.pname').textContent = enemy.name;
-  ePanel.querySelector('.pname').style.color =
-    enemy.type === 'gojo' ? '#9fd8ff' : (enemy.type === 'sukunaTs' ? '#c9a4ff' : '#ff8a8a');
+  ePanel.querySelector('.pname').style.color = nameColor(enemy.type);
 }
 
 /* ══════════════════════════════════════════
@@ -286,6 +311,13 @@ const SKILL_SETS = {
     { act:'tobi',     label:'脱兔',      sub:'T', cls:'tobi' },
     { act:'mahoraga', label:'魔虚罗',    sub:'R', cls:'shadow' },
     { act:'attack',   label:'斩击',      sub:'J', cls:'attackbtn' },
+  ],
+  higuruma: [
+    { act:'domain',   label:'诛伏赐死',  sub:'SPACE', cls:'gold' },
+    { act:'shinuchi', label:'神槌',      sub:'Q', cls:'red' },
+    { act:'sentence', label:'死刑宣告',  sub:'E', cls:'purple' },
+    { act:'reverse',  label:'反转术式',  sub:'H', cls:'green' },
+    { act:'attack',   label:'法槌',      sub:'J', cls:'attackbtn' },
   ],
 };
 
@@ -331,6 +363,18 @@ const CHAR_INFO = {
       ['反转术式', 'H · 回复生命'],
     ],
   },
+  higuruma: {
+    title: '日车宽见',
+    stats: 'HP 1350 · 咒力 130 · 速度 276 · 法槌 34',
+    skills: [
+      ['法槌', 'J · 近战挥槌（范围 68）'],
+      ['神槌', 'Q · 70 咒力 · 短距突进 260px + 40 伤害并击退'],
+      ['死刑宣告', 'E · 35 咒力 · 220 范围内目标 15 秒内受到伤害 +50%'],
+      ['反转术式', 'H · 35 咒力 · 回复 200 生命'],
+      ['诛伏赐死', '空格 · 领域：进入者 10 秒内禁用所有主动术式（含领域/反转）'],
+      ['审判', '领域内自身移速 +30%、受到伤害 −30%'],
+    ],
+  },
 };
 
 let lastSelect = { side: null, char: null };
@@ -345,7 +389,7 @@ function showCharInfo(side, char){
   }
   const info = CHAR_INFO[char];
   const sideLabel = side === 'player' ? '你的角色' : '人机角色';
-  const color = char === 'gojo' ? '#9fd8ff' : (char === 'sukunaTs' ? '#c9a4ff' : '#ff8a8a');
+  const color = nameColor(char);
   let html = `<div class="ci-head"><span class="ci-name" style="color:${color}">${info.title}</span><span class="ci-side">${sideLabel}</span></div>`;
   html += `<div class="ci-stats">${info.stats}</div><div class="ci-skills">`;
   for (const [n, d] of info.skills){
@@ -387,6 +431,12 @@ function renderControls(){
 }
 
 function handleAction(act){
+  /* ★ 审判：被禁用术式时只能普攻 */
+  if (act !== 'attack' && player && player.skillLock > 0){
+    addEffect({ type:'text', x:player.x, y:player.y-62, t:0, life:1.0,
+      text:'审判 · 术式被禁止', color:'#ff9a9a', size:14 });
+    return;
+  }
   switch(act){
     case 'attack':     basicAttack(player, enemy); break;
     case 'domain':     castDomain(player, enemy); break;
@@ -404,6 +454,8 @@ function handleAction(act){
     case 'mahoraga':   tsMahoraga(player); break;
     case 'space':      tsSpaceSlash(player, enemy); break;
     case 'brainbreak': brainBreak(player); break;
+    case 'shinuchi':   higurumaShinuchi(player, enemy); break;
+    case 'sentence':   higurumaSentence(player); break;
   }
 }
 
@@ -422,11 +474,13 @@ window.addEventListener('keydown', e => {
       if (player.type === 'gojo') handleAction('blue');
       else if (player.type === 'sukuna') handleAction('dismantle');
       else if (player.type === 'sukunaTs') handleAction('nue');
+      else if (player.type === 'higuruma') handleAction('shinuchi');
       break;
     case 'e':
       if (player.type === 'gojo') handleAction('red');
       else if (player.type === 'sukuna') handleAction('fire');
       else if (player.type === 'sukunaTs') handleAction('dog');
+      else if (player.type === 'higuruma') handleAction('sentence');
       break;
     case 'r':
       if (player.type === 'gojo') handleAction('purple');
@@ -540,29 +594,53 @@ function acquireAim(attacker, defaultTarget){
   return best || defaultTarget;
 }
 
+/* 日车宽见：是否身处自己的「诛伏赐死」领域内 */
+function inOwnHigurumaDomain(f){
+  return !!(f && f.domain && f.domain.type === 'higuruma' && dist(f, f.domain) < f.domain.r);
+}
+
+/* 实际移动速度（含领域加成，如诛伏赐死 +30%） */
+function moveSpeed(f){
+  let spd = f.speed;
+  if (f.type === 'higuruma' && inOwnHigurumaDomain(f)) spd *= CFG.higuruma.domainSpeedMul;
+  return spd;
+}
+
+/* 普攻为「贴身近战」的角色（其余角色普攻为远程斩击） */
+const MELEE_TYPES = { gojo: true, higuruma: true };
+function isMeleeType(type){ return !!MELEE_TYPES[type]; }
+
 function basicAttack(attacker, target){
   if (!attacker || !attacker.alive || attacker.stun > 0 || attacker.attackCd > 0) return;
   if (!target || !target.alive) return;
   const c = CFG[attacker.type];
 
-  if (attacker.type === 'gojo'){
+  if (isMeleeType(attacker.type)){
+    const isGojo = attacker.type === 'gojo';
     let dmg = c.atkDmg;
-    if (attacker.blueFist){
-      if (attacker.ce < c.bfCost) return;
-      attacker.ce -= c.bfCost;
-      dmg *= c.bfMult;
+    let isBF = false;
+
+    /* 五条悟专属：苍拳与黑闪 */
+    if (isGojo){
+      if (attacker.blueFist){
+        if (attacker.ce < c.bfCost) return;
+        attacker.ce -= c.bfCost;
+        dmg *= c.bfMult;
+      }
+      isBF = Math.random() < 0.12;
+      if (isBF){
+        dmg *= 2.5;
+        attacker.ce = attacker.maxCe;   /* 黑闪直接充满（上限为角色咒力上限） */
+        addEffect({ type:'blackflash', x:target.x, y:target.y, t:0, life:0.55 });
+        addEffect({ type:'text', x:attacker.x, y:attacker.y-60, t:0, life:1.1, text:'黑 闪！', color:'#ff3b3b', size:26 });
+        G.shake = 20; G.flash = 0.45;
+      }
     }
-    const isBF = Math.random() < 0.12;
-    if (isBF){
-      dmg *= 2.5;
-      attacker.ce = attacker.maxCe;   /* 黑闪直接充满（上限为角色咒力上限） */
-      addEffect({ type:'blackflash', x:target.x, y:target.y, t:0, life:0.55 });
-      addEffect({ type:'text', x:attacker.x, y:attacker.y-60, t:0, life:1.1, text:'黑 闪！', color:'#ff3b3b', size:26 });
-      G.shake = 20; G.flash = 0.45;
-    }
+
     attacker.attackCd = c.atkCd;
-    addEffect({ type:'punch', x:attacker.x, y:attacker.y, ang:attacker.facing, t:0, life:0.16 });
-    if (attacker.blueFist){
+    addEffect({ type:'punch', x:attacker.x, y:attacker.y, ang:attacker.facing, t:0, life:0.16,
+      color: isGojo ? '#b4e6ff' : '#ffd76a' });
+    if (isGojo && attacker.blueFist){
       /* ★ 苍拳冲拳：向前突进 + 能量冲拳特效 */
       const la = attacker.facing;
       attacker.x = clamp(attacker.x + Math.cos(la)*14, attacker.r, WORLD.w-attacker.r);
@@ -575,7 +653,7 @@ function basicAttack(attacker, target){
       damage(target, dmg);
       const ang = Math.atan2(target.y-attacker.y, target.x-attacker.x);
       let kb = isBF ? 26 : 12;
-      if (attacker.blueFist) kb *= c.blueFistKb;
+      if (isGojo && attacker.blueFist) kb *= c.blueFistKb;
       target.x = clamp(target.x + Math.cos(ang)*kb, target.r, WORLD.w-target.r);
       target.y = clamp(target.y + Math.sin(ang)*kb, target.r, WORLD.h-target.r);
       addEffect({ type:'ring', x:target.x, y:target.y, t:0, life:0.25,
@@ -924,12 +1002,141 @@ function tsSpaceSlash(s, target){
 }
 
 /* ══════════════════════════════════════════
+   日车宽见术式 —— 审判
+   ══════════════════════════════════════════ */
+/* 神槌：短距离突进 + 高伤（70 咒力 / 40 伤害） */
+function higurumaShinuchi(s, target){
+  const c = CFG.higuruma;
+  if (!s || !s.alive || s.stun > 0 || s.cd.shinuchi > 0 || s.ce < c.shinuchiCost) return;
+  s.ce -= c.shinuchiCost;
+  s.cd.shinuchi = c.shinuchiCd;
+
+  const aim = acquireAim(s, target);
+  const ang = aim ? Math.atan2(aim.y-s.y, aim.x-s.x) : (finite(s.facing) ? s.facing : 0);
+  s.facing = ang;
+
+  const fromX = s.x, fromY = s.y;
+  s.x = clamp(s.x + Math.cos(ang)*c.shinuchiDash, s.r, WORLD.w - s.r);
+  s.y = clamp(s.y + Math.sin(ang)*c.shinuchiDash, s.r, WORLD.h - s.r);
+
+  /* 突进轨迹 */
+  for (let i = 1; i <= 10; i++){
+    const k = i/10;
+    addEffect({ type:'spark', x: fromX + (s.x-fromX)*k, y: fromY + (s.y-fromY)*k,
+      t:0, life:rnd(.18,.34), vx:rnd(-50,50), vy:rnd(-50,50), color:'#ffd76a', size:rnd(2,4) });
+  }
+  addEffect({ type:'ring', x:s.x, y:s.y, t:0, life:0.35, r0:8, r1:96, color:'#ffd76a', width:5 });
+
+  /* 沿途命中敌方本体（只结算一次） */
+  const foe = s === player ? enemy : player;
+  if (foe && foe.alive){
+    for (let i = 1; i <= 12; i++){
+      const k = i/12;
+      const px = fromX + (s.x-fromX)*k, py = fromY + (s.y-fromY)*k;
+      if (Math.hypot(px-foe.x, py-foe.y) <= s.r + foe.r + 18){
+        damage(foe, c.shinuchiDmg);
+        foe.kbx = Math.cos(ang)*c.shinuchiKb;
+        foe.kby = Math.sin(ang)*c.shinuchiKb;
+        G.shake = Math.max(G.shake, 16);
+        break;
+      }
+    }
+  }
+  /* 终点命中的式神 */
+  for (const sm of summons){
+    if (!sm || sm.owner !== foe) continue;
+    if (dist(s, sm) <= s.r + sm.r + 26) damageSummon(sm, c.shinuchiDmg, 'melee');
+  }
+
+  addEffect({ type:'text', x:s.x, y:s.y-72, t:0, life:1.0, text:'神槌', color:'#ffd76a', size:20 });
+  G.shake = Math.max(G.shake, 8);
+}
+
+/* 死刑宣告：范围内目标 15 秒内受到伤害 +50% */
+function higurumaSentence(s){
+  const c = CFG.higuruma;
+  if (!s || !s.alive || s.stun > 0 || s.cd.sentence > 0 || s.ce < c.sentenceCost) return;
+  s.ce -= c.sentenceCost;
+  s.cd.sentence = c.sentenceCd;
+
+  const foe = s === player ? enemy : player;
+  let marked = 0;
+  if (foe && foe.alive && dist(s, foe) <= c.sentenceRange + foe.r){
+    foe.sentence = c.sentenceDuration;
+    marked++;
+  }
+  for (const sm of summons){
+    if (!sm || sm.owner !== foe) continue;
+    if (dist(s, sm) <= c.sentenceRange + sm.r){ sm.sentence = c.sentenceDuration; marked++; }
+  }
+
+  addEffect({ type:'ring', x:s.x, y:s.y, t:0, life:0.6,
+    r0:24, r1:c.sentenceRange, color:'#ff4a4a', width:4 });
+  addEffect({ type:'text', x:s.x, y:s.y-72, t:0, life:1.3, text:'死刑宣告', color:'#ff4a4a', size:22 });
+  if (marked === 0)
+    addEffect({ type:'text', x:s.x, y:s.y-46, t:0, life:1.0, text:'范围内无目标', color:'#ff9a9a', size:12 });
+  G.shake = Math.max(G.shake, 10);
+}
+
+/* ★ 日车宽见 AI：先贴「死刑」，再开庭，领域内靠普攻收人头 */
+function aiHiguruma(ai, target, d, ang){
+  const c = CFG.higuruma;
+  const marked = target.sentence > 0;
+
+  /* 开庭：把敌人关进法庭 */
+  if (ai.cd.domain <= 0 && ai.ce >= c.domainCost && !ai.domain && !player.domain &&
+      (d < 320 || target.hp < target.maxHp*0.6)) castDomain(ai, target);
+
+  /* 死刑宣告：没有标记就贴上去宣告 */
+  if (!marked && ai.cd.sentence <= 0 && ai.ce >= c.sentenceCost &&
+      d < c.sentenceRange + target.r) higurumaSentence(ai);
+
+  /* 神槌：既是突进也是爆发 */
+  if (ai.cd.shinuchi <= 0 && ai.ce >= c.shinuchiCost && d < 520 &&
+      (marked || d > 220)) higurumaShinuchi(ai, target);
+
+  if (ai.attackCd <= 0 && d < ai.r + target.r + c.atkRange + 16) basicAttack(ai, target);
+
+  /* 走位：领域内/已宣告死刑时贴身，否则维持中距 */
+  const press = inOwnHigurumaDomain(ai) || marked;
+  let m, strafe;
+  if (press){
+    m = d > 70 ? 1 : (d < 46 ? -0.2 : 0.06);
+    strafe = Math.sin(G.time * 2.2) * 0.25;
+  } else {
+    m = d > 300 ? 1 : (d < 160 ? -0.7 : 0.15);
+    strafe = Math.sin(G.time * 1.6) * 0.45;
+  }
+  return { x: Math.cos(ang)*m + Math.cos(ang+Math.PI/2)*strafe,
+           y: Math.sin(ang)*m + Math.sin(ang+Math.PI/2)*strafe };
+}
+
+/* ★ 被审判封印术式时的 AI 行为：只能走位 + 普攻 */
+function aiMoveOnly(ai, target, d, ang){
+  const c = CFG[ai.type];
+  const melee = isMeleeType(ai.type);
+  const range = melee ? (ai.r + target.r + c.atkRange + 16) : 520;
+  if (ai.attackCd <= 0 && d < range) basicAttack(ai, target);
+
+  let m;
+  if (melee) m = d > 60 ? 1 : (d < 34 ? -0.2 : 0.05);
+  else m = d > 420 ? 0.9 : (d < 200 ? -0.7 : 0.1);
+  const strafe = Math.sin(G.time * 2.0) * 0.35;
+  return { x: Math.cos(ang)*m + Math.cos(ang+Math.PI/2)*strafe,
+           y: Math.sin(ang)*m + Math.sin(ang+Math.PI/2)*strafe };
+}
+
+/* ══════════════════════════════════════════
    伤害
    ══════════════════════════════════════════ */
 function damage(target, amount, silent){
   if (!target || !target.alive) return;
   let d = amount;
   if (target.type === 'gojo' && target.infinity) d *= (1 - CFG.gojo.infDR);
+  /* ★ 死刑：受到伤害 +50% */
+  if (target.sentence > 0) d *= (1 + CFG.higuruma.sentenceAmp);
+  /* ★ 诛伏赐死：领域内自身受到的伤害 -30% */
+  if (target.type === 'higuruma' && inOwnHigurumaDomain(target)) d *= (1 - CFG.higuruma.domainDR);
   target.hp -= d;
   target.hitFlash = 0.14;
 
@@ -962,6 +1169,7 @@ function damageSummon(s, amount, srcType, silent){
   if (!s || !finite(s.hp) || s.hp <= 0) return;
   let d = amount;
   const key = srcType || 'unknown';
+  if (s.sentence > 0) d *= (1 + CFG.higuruma.sentenceAmp);   /* ★ 死刑标记 */
 
   /* ★ 魔虚罗：同一能力每命中一次，就对该能力多一层减伤 */
   if (s.type === 'mahoraga'){
@@ -1061,6 +1269,8 @@ function updatePlayer(dt){
   if (p.stun > 0) p.stun -= dt;
   if (p.hitFlash > 0) p.hitFlash -= dt;
   if (p.domainLock > 0) p.domainLock -= dt;
+  if (p.skillLock > 0) p.skillLock -= dt;
+  if (p.sentence > 0) p.sentence -= dt;
   for (const k in p.cd) if (p.cd[k] > 0) p.cd[k] = Math.max(0, p.cd[k] - dt);
   if (p.attackCd > 0) p.attackCd -= dt;
 
@@ -1086,8 +1296,9 @@ function updatePlayer(dt){
   }
 
   if (p.stun <= 0){
-    p.x = clamp(p.x + mx*p.speed*dt, p.r, WORLD.w - p.r);
-    p.y = clamp(p.y + my*p.speed*dt, p.r, WORLD.h - p.r);
+    const spd = moveSpeed(p);
+    p.x = clamp(p.x + mx*spd*dt, p.r, WORLD.w - p.r);
+    p.y = clamp(p.y + my*spd*dt, p.r, WORLD.h - p.r);
   }
 
   if (enemy.alive) p.facing = Math.atan2(enemy.y-p.y, enemy.x-p.x);
@@ -1109,6 +1320,8 @@ function updateAI(dt){
 
   if (ai.hitFlash > 0) ai.hitFlash -= dt;
   if (ai.domainLock > 0) ai.domainLock -= dt;
+  if (ai.skillLock > 0) ai.skillLock -= dt;
+  if (ai.sentence > 0) ai.sentence -= dt;
   for (const k in ai.cd) if (ai.cd[k] > 0) ai.cd[k] = Math.max(0, ai.cd[k] - dt);
   if (ai.attackCd > 0) ai.attackCd -= dt;
   ai.ce = Math.min(ai.maxCe, ai.ce + c.ceRegen*dt);
@@ -1132,23 +1345,33 @@ function updateAI(dt){
   const ang = Math.atan2(target.y-ai.y, target.x-ai.x);
   if (finite(ang)) ai.facing = ang;
 
-  /* ① 保命优先：大脑受损 / 残血时先修反转术式 */
-  const lowHp = ai.hp < ai.maxHp * c.reverseThreshold;
-  if ((ai.brainDamaged || lowHp) && ai.cd.reverse <= 0 && ai.ce >= c.reverseCost) castReverse(ai);
+  /* ★ 审判：术式被禁止时只能走位 + 普攻 */
+  const sealed = ai.skillLock > 0;
 
-  /* ② 玩家展开领域 → 立刻同步展开对冲 */
-  if (player.domain && !enemy.domain && enemy.domainLock <= 0 && enemy.ce >= c.domainCost && !enemy.brainDamaged){
-    enemy.cd.domain = 0;
-    castDomain(enemy, player);
-    addEffect({ type:'text', x:enemy.x, y:enemy.y-118, t:0, life:1.8,
-      text: enemy.name + ' 同步展开领域！', color:'#ffb0b0', size:16 });
-  }
-
-  /* ③ 角色专属决策（各自发挥优势） */
   let mv = { x: 0, y: 0 };
-  if (ai.type === 'gojo') mv = aiGojo(ai, target, d, ang);
-  else if (ai.type === 'sukuna') mv = aiSukuna(ai, target, d, ang);
-  else mv = aiSukunaTs(ai, target, d, ang);
+  if (sealed){
+    ai.infinity = false;
+    ai.blueFist = false;
+    mv = aiMoveOnly(ai, target, d, ang);
+  } else {
+    /* ① 保命优先：大脑受损 / 残血时先修反转术式 */
+    const lowHp = ai.hp < ai.maxHp * c.reverseThreshold;
+    if ((ai.brainDamaged || lowHp) && ai.cd.reverse <= 0 && ai.ce >= c.reverseCost) castReverse(ai);
+
+    /* ② 玩家展开领域 → 立刻同步展开对冲 */
+    if (player.domain && !enemy.domain && enemy.domainLock <= 0 && enemy.ce >= c.domainCost && !enemy.brainDamaged){
+      enemy.cd.domain = 0;
+      castDomain(enemy, player);
+      addEffect({ type:'text', x:enemy.x, y:enemy.y-118, t:0, life:1.8,
+        text: enemy.name + ' 同步展开领域！', color:'#ffb0b0', size:16 });
+    }
+
+    /* ③ 角色专属决策（各自发挥优势） */
+    if (ai.type === 'gojo') mv = aiGojo(ai, target, d, ang);
+    else if (ai.type === 'sukuna') mv = aiSukuna(ai, target, d, ang);
+    else if (ai.type === 'higuruma') mv = aiHiguruma(ai, target, d, ang);
+    else mv = aiSukunaTs(ai, target, d, ang);
+  }
 
   /* ④ 叠加闪避：躲开直射向自己的飞行道具 */
   const dodgeAng = aiDodge(ai, dt);
@@ -1161,8 +1384,9 @@ function updateAI(dt){
   const len = Math.hypot(mv.x, mv.y);
   if (len > 0.01){
     const nx = mv.x/len, ny = mv.y/len;
-    ai.x = clamp(ai.x + nx*ai.speed*dt*kbFactor, ai.r, WORLD.w - ai.r);
-    ai.y = clamp(ai.y + ny*ai.speed*dt*kbFactor, ai.r, WORLD.h - ai.r);
+    const spd = moveSpeed(ai);
+    ai.x = clamp(ai.x + nx*spd*dt*kbFactor, ai.r, WORLD.w - ai.r);
+    ai.y = clamp(ai.y + ny*spd*dt*kbFactor, ai.r, WORLD.h - ai.r);
   }
 }
 
@@ -1188,9 +1412,12 @@ function aiDodge(ai, dt){
   return dir + (Math.random() < 0.5 ? Math.PI/2 : -Math.PI/2);
 }
 
-/* ★ 五条悟：中远距离压制 · 苍→赫→茈连招 · 无下限防守 · 破脑重置领域 */
+/* ★ 五条悟：中远距离压制 · 苍→赫→茈连招 · 无下限防守 · 抓僵直贴身爆发 */
 function aiGojo(ai, target, d, ang){
   const c = CFG.gojo;
+
+  /* 机会窗口：玩家被僵直（如无量空处）时立刻贴身爆发，而不是继续拉开距离 */
+  const punish = target.stun > 0;
 
   /* 无下限：咒力充裕且处在威胁距离时开启（带迟滞，避免来回开关） */
   if (!ai.infinity && ai.ce > 58 && d < 470) ai.infinity = true;
@@ -1200,28 +1427,39 @@ function aiGojo(ai, target, d, ang){
   if (!ai.brainDamaged && ai.cd.domain > 5 && ai.hp > ai.maxHp * 0.8 &&
       ai.ce < 30 && d < 420 && Math.random() < 0.02) brainBreak(ai);
 
-  /* 领域：玩家残血或身处无量空处范围内时展开 */
+  /* 领域：玩家残血 / 身处范围内 / 已被僵直 → 直接展开扩大优势 */
   if (ai.cd.domain <= 0 && ai.ce >= c.domainCost && !ai.domain && !player.domain &&
-      !ai.brainDamaged && (target.hp < target.maxHp*0.55 || d < 285)) castDomain(ai, target);
+      !ai.brainDamaged && (target.hp < target.maxHp*0.55 || d < 285 || punish))
+    castDomain(ai, target);
 
   /* 连招：苍（吸附）→ 赫（击退）→ 茈（终结） */
   if (ai.blueUsed && ai.redUsed && ai.cd.purple <= 0 && ai.ce >= c.purpleCost && d < 560)
     gojoPurple(ai, target);
-  if (!ai.redUsed && ai.cd.red <= 0 && ai.ce >= c.redCost + 14 && d < 470 && Math.random() < 0.7)
+
+  /* 僵直贴脸时不用「赫」，避免把到手的猎物击飞出近身范围 */
+  const avoidRed = punish && d < 220;
+  if (!avoidRed && !ai.redUsed && ai.cd.red <= 0 && ai.ce >= c.redCost + 14 && d < 470 && Math.random() < 0.7)
     gojoRed(ai, target);
-  if (!ai.blueUsed && ai.cd.blue <= 0 && ai.ce >= c.blueCost + 14 && d > 130 && Math.random() < 0.7)
+
+  /* 苍：把玩家吸进拳头范围（僵直时更积极） */
+  if (!ai.blueUsed && ai.cd.blue <= 0 && ai.ce >= c.blueCost + 14 &&
+      (punish ? d > 60 : d > 130) && Math.random() < (punish ? 0.9 : 0.7))
     gojoBlue(ai, target);
 
-  /* 苍拳用于近身对拼 */
-  ai.blueFist = ai.ce > ai.maxCe * 0.6;
-  if (ai.attackCd <= 0 && d < ai.r + target.r + c.atkRange + 18) basicAttack(ai, target);
+  /* 苍拳：僵直时咒力够就开，并全力贴身输出 */
+  ai.blueFist = punish ? ai.ce > 26 : ai.ce > ai.maxCe * 0.6;
+  if (ai.attackCd <= 0 && d < ai.r + target.r + c.atkRange + (punish ? 24 : 18))
+    basicAttack(ai, target);
 
-  /* 走位：维持 240~400 的中距离并侧向游走（不主动贴身缠斗） */
-  let m = 0;
-  if (d > 400) m = 1;
-  else if (d < 240) m = -0.9;
-  else m = 0.12;
-  const strafe = Math.sin(G.time*1.7) * 0.5;
+  /* 走位：平时维持 240~400 中距离；玩家僵直时冲上去贴脸追击 */
+  let m, strafe;
+  if (punish){
+    m = d > 72 ? 1 : (d < 48 ? -0.2 : 0.05);
+    strafe = Math.sin(G.time * 2.6) * 0.18;
+  } else {
+    m = d > 400 ? 1 : (d < 240 ? -0.9 : 0.12);
+    strafe = Math.sin(G.time * 1.7) * 0.5;
+  }
   return { x: Math.cos(ang)*m + Math.cos(ang+Math.PI/2)*strafe,
            y: Math.sin(ang)*m + Math.sin(ang+Math.PI/2)*strafe };
 }
@@ -1509,6 +1747,7 @@ function updateSummons(dt){
     if (s.hitFlash > 0) s.hitFlash -= dt;
     if (s.slashAnim > 0) s.slashAnim -= dt;
     if (s.stun > 0) s.stun -= dt;
+    if (s.sentence > 0) s.sentence -= dt;
 
     if (!s.noExpire) s.life -= dt;
 
@@ -1675,6 +1914,15 @@ function applyDomainEffect(owner, target, dt){
         text:'无量空处 · 2秒僵直 / 领域封印20秒', color:'#c9a4ff', size:15 });
       G.flash = 0.5;
     }
+  } else if (d.type === 'higuruma'){
+    /* 诛伏赐死：领域内敌人 10 秒内无法使用任何主动术式（含领域与反转术式） */
+    target.skillLock = Math.max(target.skillLock || 0, CFG.higuruma.domainSeal);
+    if (!d.hitOpponent){
+      d.hitOpponent = true;
+      addEffect({ type:'text', x:target.x, y:target.y-70, t:0, life:1.8,
+        text:'诛伏赐死 · 10 秒内术式禁止', color:'#ffd76a', size:16 });
+      G.flash = 0.5;
+    }
   } else {
     /* 伏魔御厨子（含十影宿傩）：持续伤害，按 CFG.domainDps 决定强度 */
     const c = CFG[d.type];
@@ -1693,6 +1941,7 @@ function applyDomainToSummons(owner, dt){
   if (!owner || !owner.domain) return;
   const d = owner.domain;
   const c = CFG[d.type];
+  if (d.type === 'higuruma') return;              /* 审判领域不作用于式神 */
   for (const s of summons){
     if (!s || s.owner === owner) continue;           // 只影响敌方式神
     if (!finite(s.x) || !finite(s.y) || s.hp <= 0) continue;
@@ -1901,6 +2150,84 @@ function drawDomain(d){
       ctx.arc(Math.cos(ph)*rr, Math.sin(ph)*rr, 1.6, 0, TAU);
       ctx.fillStyle = `rgba(240,225,255,${alpha})`;
       ctx.fill();
+    }
+    ctx.restore();
+  } else if (d.type === 'higuruma'){
+    /* ★ 诛伏赐死：血色法庭 + 中央金色天平 */
+    const gold = 'rgba(255,215,110,';
+    const hg = ctx.createRadialGradient(d.x,d.y, d.r*0.08, d.x,d.y, d.r);
+    hg.addColorStop(0, `rgba(70,6,10,${alpha*0.95})`);
+    hg.addColorStop(0.5, `rgba(120,14,20,${alpha*0.7})`);
+    hg.addColorStop(1, 'rgba(200,40,40,0)');
+    ctx.beginPath(); ctx.arc(d.x, d.y, d.r, 0, TAU);
+    ctx.fillStyle = hg; ctx.fill();
+    ctx.strokeStyle = gold + `${Math.min(0.95, alpha*1.7)})`;
+    ctx.lineWidth = 5;
+    ctx.beginPath(); ctx.arc(d.x, d.y, d.r, 0, TAU); ctx.stroke();
+
+    ctx.save();
+    ctx.translate(d.x, d.y);
+    ctx.rotate(G.time * 0.12);
+    /* 席位刻度 */
+    ctx.strokeStyle = gold + `${alpha*0.7})`;
+    ctx.lineWidth = 2;
+    for (let i = 0; i < 16; i++){
+      const a = i/16*TAU;
+      ctx.beginPath();
+      ctx.moveTo(Math.cos(a)*d.r*0.78, Math.sin(a)*d.r*0.78);
+      ctx.lineTo(Math.cos(a)*d.r*0.88, Math.sin(a)*d.r*0.88);
+      ctx.stroke();
+    }
+    /* 旋转的「判」字环 */
+    ctx.font = '900 22px system-ui,sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillStyle = gold + `${Math.min(0.9, alpha*1.6)})`;
+    for (let i = 0; i < 4; i++){
+      const a = i/4*TAU;
+      ctx.fillText('判', Math.cos(a)*d.r*0.6, Math.sin(a)*d.r*0.6 + 8);
+    }
+    ctx.restore();
+
+    /* 中央天平 */
+    const S = d.r * 0.26;
+    const sway = Math.sin(G.time * 1.6) * 0.10;
+    ctx.save();
+    ctx.translate(d.x, d.y);
+    ctx.strokeStyle = gold + `${Math.min(0.95, alpha*1.8)})`;
+    ctx.lineWidth = 4;
+    ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(0, S*0.85); ctx.lineTo(0, -S*0.9); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(-S*0.5, S*0.85); ctx.lineTo(S*0.5, S*0.85); ctx.stroke();
+    ctx.save();
+    ctx.rotate(sway);
+    ctx.beginPath(); ctx.moveTo(-S, -S*0.7); ctx.lineTo(S, -S*0.7); ctx.stroke();
+    ctx.lineWidth = 2.5;
+    for (const sx of [-1, 1]){
+      ctx.beginPath();
+      ctx.moveTo(sx*S*0.92, -S*0.7);
+      ctx.lineTo(sx*S*0.92, -S*0.15);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(sx*S*0.92, -S*0.1, S*0.22, 0, Math.PI);
+      ctx.stroke();
+    }
+    ctx.restore();
+    ctx.beginPath(); ctx.arc(0, -S*1.02, S*0.12, 0, TAU);
+    ctx.fillStyle = `rgba(255,240,190,${Math.min(1, alpha*1.8)})`; ctx.fill();
+    ctx.lineCap = 'butt';
+    ctx.restore();
+
+    /* 法庭栅栏光柱 */
+    ctx.save();
+    ctx.globalAlpha = Math.min(0.5, alpha);
+    ctx.strokeStyle = 'rgba(255,190,120,0.28)';
+    ctx.lineWidth = 6;
+    const hoff = (G.time * 40) % 90;
+    for (let x = -d.r; x <= d.r; x += 90){
+      ctx.beginPath();
+      ctx.moveTo(d.x + x + hoff, d.y - d.r*0.9);
+      ctx.lineTo(d.x + x + hoff - 30, d.y + d.r*0.9);
+      ctx.stroke();
     }
     ctx.restore();
   } else {
@@ -2373,9 +2700,51 @@ function drawProjectiles(){
    绘制角色
    ══════════════════════════════════════════ */
 function drawFighter(f){
+  drawStatusAuras(f);
   if (f.type === 'gojo') drawGojo(f);
   else if (f.type === 'sukunaTs') drawSukunaTs(f);
+  else if (f.type === 'higuruma') drawHiguruma(f);
   else drawSukuna(f);
+}
+
+/* ★ 通用状态标记：死刑（受伤 +50%） / 术式禁止（审判） */
+function drawStatusAuras(f){
+  if (!f || (!(f.sentence > 0) && !(f.skillLock > 0))) return;
+
+  ctx.save();
+  ctx.translate(f.x, f.y);
+  if (f.sentence > 0){
+    const pulse = 0.55 + Math.sin(G.time*9)*0.25;
+    ctx.beginPath(); ctx.arc(0,0, f.r + 15 + Math.sin(G.time*6)*3, 0, TAU);
+    ctx.strokeStyle = `rgba(255,60,60,${pulse})`;
+    ctx.lineWidth = 3;
+    ctx.stroke();
+  }
+  if (f.skillLock > 0){
+    ctx.save();
+    ctx.rotate(G.time*1.2);
+    ctx.strokeStyle = 'rgba(255,215,110,0.85)';
+    ctx.lineWidth = 3;
+    if (ctx.setLineDash) ctx.setLineDash([7,7]);
+    ctx.beginPath(); ctx.arc(0,0, f.r + 26, 0, TAU); ctx.stroke();
+    if (ctx.setLineDash) ctx.setLineDash([]);
+    ctx.restore();
+  }
+  ctx.restore();
+
+  const tags = [];
+  if (f.sentence > 0)  tags.push(['死刑 ' + f.sentence.toFixed(1) + 's', 'rgba(255,90,90,0.95)']);
+  if (f.skillLock > 0) tags.push(['术式禁止 ' + f.skillLock.toFixed(1) + 's', 'rgba(255,215,110,0.95)']);
+  if (!tags.length) return;
+
+  ctx.save();
+  ctx.font = '900 12px system-ui,sans-serif';
+  ctx.textAlign = 'center';
+  tags.forEach((t, i) => {
+    ctx.fillStyle = t[1];
+    ctx.fillText(t[0], f.x, f.y + f.r + 42 + i*15);
+  });
+  ctx.restore();
 }
 
 function drawGojo(p){
@@ -2550,6 +2919,46 @@ function drawSukunaTs(s){
   drawSukunaLabel(s, '十影宿傩', 'rgba(200,160,255,0.9)');
 }
 
+function drawHiguruma(h){
+  ctx.save();
+  ctx.translate(h.x, h.y);
+
+  /* 身体：墨色西装 + 金色法槌 */
+  ctx.beginPath(); ctx.arc(0,0,h.r,0,TAU);
+  const bg = ctx.createRadialGradient(-h.r*0.35,-h.r*0.35,1, 0,0,h.r);
+  bg.addColorStop(0,'#3b4050'); bg.addColorStop(0.55,'#1b1f2c'); bg.addColorStop(1,'#0a0d14');
+  ctx.fillStyle = bg; ctx.fill();
+  ctx.strokeStyle = h.hitFlash > 0 ? '#ff4a4a' : '#ffd76a';
+  ctx.lineWidth = 2.5; ctx.stroke();
+
+  /* 金色领带（朝向指示） */
+  ctx.save();
+  ctx.rotate(h.facing);
+  ctx.strokeStyle = '#c9a05a';
+  ctx.lineWidth = 4;
+  ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(h.r*0.2, 0); ctx.lineTo(h.r*0.92, 0); ctx.stroke();
+  ctx.fillStyle = '#ffd76a';
+  ctx.fillRect(h.r*0.86, -6, 13, 12);
+  ctx.lineCap = 'butt';
+  ctx.restore();
+
+  ctx.restore();
+
+  /* 名牌 */
+  ctx.save();
+  ctx.font = '700 13px system-ui,sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillStyle = 'rgba(255,215,110,0.9)';
+  ctx.fillText('日车宽见', h.x, h.y - h.r - 16);
+  if (h.stun > 0){
+    ctx.fillStyle = 'rgba(255,180,180,0.95)';
+    ctx.font = '700 12px system-ui,sans-serif';
+    ctx.fillText('僵直 ' + h.stun.toFixed(1) + 's', h.x, h.y + h.r + 22);
+  }
+  ctx.restore();
+}
+
 function drawSukunaLabel(s, name, nameColor){
   ctx.save();
   ctx.font = '700 13px system-ui,sans-serif';
@@ -2601,7 +3010,7 @@ function drawEffects(){
       ctx.rotate(e.ang);
       ctx.beginPath();
       ctx.arc(0,0, 46 + k*26, -0.7, 0.7);
-      ctx.strokeStyle = `rgba(180,230,255,${a*0.9})`;
+      ctx.strokeStyle = hexA(e.color || '#b4e6ff', a*0.9);
       ctx.lineWidth = 7*(1-k);
       ctx.stroke();
       ctx.restore();
@@ -2789,6 +3198,18 @@ function updateButtons(){
     setCool('domain', p.cd.domain > 0 || !!p.domain, p.ce < c.domainCost);
     if (btns.dismantle)
       btns.dismantle.classList.toggle('ready', p.cd.dismantle <= 0 && p.ce >= c.dismantleCost);
+  } else if (p.type === 'higuruma'){
+    const c = CFG.higuruma;
+    /* ★ 审判期间所有主动术式置灰（普攻不受影响） */
+    const sealed = p.skillLock > 0;
+    setCool('shinuchi', sealed || p.cd.shinuchi > 0, p.ce < c.shinuchiCost);
+    setCool('sentence', sealed || p.cd.sentence > 0, p.ce < c.sentenceCost);
+    setCool('reverse', sealed || p.cd.reverse > 0 || p.hp >= p.maxHp, p.ce < c.reverseCost);
+    setCool('domain', sealed || p.cd.domain > 0 || !!p.domain, p.ce < c.domainCost);
+    if (btns.shinuchi)
+      btns.shinuchi.classList.toggle('ready', !sealed && p.cd.shinuchi <= 0 && p.ce >= c.shinuchiCost);
+    if (btns.sentence)
+      btns.sentence.classList.toggle('ready', !sealed && p.cd.sentence <= 0 && p.ce >= c.sentenceCost);
   } else {
     const c = CFG.sukunaTs;
     setCool('nue', p.cd.nue > 0, p.ce < c.nueCost);
