@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<title>咒术回战 · 五条悟 VS 宿傩</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<canvas id="game"></canvas>
+
+<div id="hud" style="display:none">
+  <div class="panel player">
+    <div class="pname">五条悟</div>
+    <div class="bar hp"><div class="fill" id="p-hp"></div><div class="txt" id="p-hp-t">1200 / 1200</div></div>
+    <div class="bar ce"><div class="fill" id="p-ce"></div><div class="txt" id="p-ce-t">100 / 100</div></div>
+  </div>
+  <div class="panel enemy">
+    <div class="pname">两面宿傩</div>
+    <div class="bar hp"><div class="fill" id="s-hp"></div><div class="txt" id="s-hp-t">1600 / 1600</div></div>
+    <div class="bar ce2"><div class="fill" id="s-ce"></div><div class="txt" id="s-ce-t">100 / 100</div></div>
+  </div>
+</div>
+
+<div id="controls" style="display:none"></div>
+<div id="tips" style="display:none">WASD / 方向键 移动 · J 普攻 · 空格 领域 · H 反转术式<br>手机：左侧拖动移动，右下按钮释放术式</div>
+
+<div id="menu" class="screen">
+  <div class="menu-title">咒 术 回 战</div>
+  <div class="menu-subtitle">五条悟 VS 两面宿傩</div>
+  <div class="menu-buttons">
+    <button class="menu-btn primary" data-mode="pve">
+      <span class="btn-icon">⚔</span>
+      <span class="btn-text">人机对战</span>
+      <span class="btn-desc">与 AI 一决胜负</span>
+    </button>
+    <button class="menu-btn" data-mode="pvp">
+      <span class="btn-icon">👥</span>
+      <span class="btn-text">联机对战</span>
+      <span class="btn-desc">敬请期待</span>
+    </button>
+  </div>
+  <div id="menuToast" class="toast"></div>
+</div>
+
+<div id="selectScreen" class="screen hidden">
+  <div class="select-title">选 择 角 色</div>
+  <div class="select-body">
+    <div class="select-col">
+      <div class="select-label">你的角色</div>
+      <div class="char-choice" data-side="player">
+        <div class="char-card" data-char="gojo">
+          <div class="char-avatar gojo-avatar">五</div>
+          <div class="char-name">五条悟</div>
+          <div class="char-desc">苍/赫/茈<br>无下限 · 无量空处</div>
+        </div>
+        <div class="char-card" data-char="sukuna">
+          <div class="char-avatar sukuna-avatar">宿</div>
+          <div class="char-name">两面宿傩</div>
+          <div class="char-desc">斩击/解/开<br>反转术式 · 伏魔御厨子</div>
+        </div>
+        <div class="char-card" data-char="sukunaTs">
+          <div class="char-avatar ts-avatar">影</div>
+          <div class="char-name">十影宿傩</div>
+          <div class="char-desc">鵺/玉犬/魔虚罗<br>伏魔御厨子（削弱）</div>
+        </div>
+      </div>
+    </div>
+    <div class="select-col">
+      <div class="select-label">人机角色</div>
+      <div class="char-choice" data-side="ai">
+        <div class="char-card" data-char="gojo">
+          <div class="char-avatar gojo-avatar">五</div>
+          <div class="char-name">五条悟</div>
+          <div class="char-desc">苍/赫/茈<br>无下限 · 无量空处</div>
+        </div>
+        <div class="char-card" data-char="sukuna">
+          <div class="char-avatar sukuna-avatar">宿</div>
+          <div class="char-name">两面宿傩</div>
+          <div class="char-desc">斩击/解/开<br>反转术式 · 伏魔御厨子</div>
+        </div>
+        <div class="char-card" data-char="sukunaTs">
+          <div class="char-avatar ts-avatar">影</div>
+          <div class="char-name">十影宿傩</div>
+          <div class="char-desc">鵺/玉犬/魔虚罗<br>伏魔御厨子（削弱）</div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="select-actions">
+    <button id="backBtn" class="menu-btn small">返 回</button>
+    <button id="startBtn" class="menu-btn primary small" disabled>开 始 战 斗</button>
+  </div>
+</div>
+
+<div id="overlay">
+  <h1 id="ov-title">胜利</h1>
+  <p id="ov-sub"></p>
+  <button id="restart">再 来 一 局</button>
+  <button id="backToMenu" class="back-btn">返回菜单</button>
+</div>
+
+<script src="script.js"></script>
+</body>
+</html>
