@@ -4,7 +4,7 @@
 const canvas = document.getElementById('game');
 const ctx = canvas.getContext('2d');
 
-let W = 0, H = 0, DPR = 1, scale = 1;
+let W = 0, H = 0, DPR = 1, scale = 1, baseScale = 1;
 const WORLD = { w: 1700, h: 1150 };
 const clamp = (v,a,b) => v < a ? a : (v > b ? b : v);
 const rnd = (a,b) => a + Math.random()*(b-a);
@@ -19,7 +19,8 @@ function resize(){
   canvas.height = Math.floor(H*DPR);
   canvas.style.width = W+'px';
   canvas.style.height = H+'px';
-  scale = clamp(Math.min(W/700, H/760), 0.34, 1.35);
+  baseScale = clamp(Math.min(W/700, H/760), 0.34, 1.35);
+  scale = baseScale;
 }
 window.addEventListener('resize', resize);
 window.addEventListener('orientationchange', () => setTimeout(resize,120));
@@ -43,6 +44,11 @@ const CFG = {
     reverseCost: 40, reverseHeal: 220, reverseCd: 9, reverseThreshold: 0.55,
     blueFistKb: 0.30,
     blueCost: 18, blueCd: 1.3, blueDmg: 18,
+    /* ★ 长按「苍」→ 吸附型引力球：滞空、把敌人拉向球心、减速、存在更久 */
+    blueHoldTime: 0.28, blueChargedLife: 6.0, blueChargedPull: 620,
+    blueChargedR: 380, blueChargedSlow: 0.45,
+    /* ★ 吸附苍 + 赫 → 大范围（480）「茈」爆炸 */
+    purpleBlastR: 480, purpleBlastDmg: 260, purpleBlastKb: 1500,
     redCost: 28, redCd: 2.0, redDmg: 90,
     purpleCost: 45, purpleCd: 4.5, purpleDmg: 180,
     domainCost: 60, domainCd: 32,
@@ -103,17 +109,98 @@ const CFG = {
     chaseSpeedMul: 1.20,   /* 追诉：场上存在被宣告目标时自身移速 +20% */
     domainPull: 300,       /* 拘传：领域内敌方被拽向法庭中央（px/s） */
     domainCost: 60, domainCd: 36,
-    /* 诛伏赐死：领域内敌人禁用一切主动术式（除普攻） */
+    /* 诛伏赐死：固定半径 720 的法庭，不再向外扩张 */
     domainName: '诛伏赐死',
-    domainBaseR: 330, domainOpenTime: 0.5, domainGrowRate: 30,
-    domainMaxR: 820, domainDuration: 11.0, domainDps: 0,
+    domainBaseR: 720, domainOpenTime: 0.5, domainGrowRate: 0,
+    domainMaxR: 720, domainDuration: 11.0, domainDps: 0,
     domainSeal: 10,        /* 进入领域的敌人 10 秒内无法使用任何主动术式 */
     domainSpeedMul: 1.30,  /* 领域内自身移速 +30% */
     domainDR: 0.30,        /* 领域内自身受到伤害 -30% */
+  },
+  /* ★ 伏黑甚尔 —— 天与咒缚：没有咒力的体术怪物，领域无法将其「选中」 */
+  toji: {
+    name: '伏黑甚尔',
+    maxHp: 2000, maxCe: 100, ceRegen: 12, speed: 355, r: 23,
+    /* 体术：全场最高的近战伤害与最远的拳脚距离 */
+    atkDmg: 78, atkCd: 0.30, atkRange: 88,
+    bodyDR: 0.25,   /* ★ 天与咒缚：没有咒力可被灌注，一切伤害 -25% */
+    /* ★ 无反转术式：甚尔完全靠肉体硬扛，没有回复手段 */
+    /* 天逆鉾：白色弧形闪光，命中后目标 5 秒无法使用术式与领域（远程消耗主力） */
+    heavenCost: 28, heavenCd: 7, heavenDmg: 130, heavenSeal: 5, heavenSpeed: 900,
+    /* 万里锁：钩中目标 → 拽向自己 + 3 秒眩晕（拉近远程的关键） */
+    chainCost: 35, chainCd: 10, chainDmg: 60, chainStun: 3,
+    chainSpeed: 1250, chainPull: 0.55, chainRange: 900,
+    /* 蝇头：与脱兔同类的小型召唤物（棕黄），每次 4 只、无上限、无攻击
+       → 朝敌方呈扇形扑出，作为挡弹幕的肉盾 */
+    flyCost: 18, flyCd: 5, flyHp: 70, flyDur: 6, flyCount: 4, flySpeed: 340,
+    heavenImmuneDomain: true,   /* ★ 无法被领域选中 */
   }
 };
 
 const CLASH_DMG_LIMIT = 200;
+
+/* ══════════════════════════════════════════
+   开场台词（对决开始前 · 角色头顶打字机对白）
+   self   = 该角色作为玩家方时的开场白
+   retort = 面对某角色时的开场白（优先于 self）
+   ══════════════════════════════════════════ */
+const INTRO_CPS = 14;      /* 打字机速度：每秒输出字数 */
+const INTRO_HOLD = 1.5;    /* 整句显示完后的停留秒数 */
+const INTRO_QUOTES = {
+  gojo: {
+    self: '事先声明一下，你才是挑战者',
+    retort: {
+      gojo: '镜子里的人，也想当最强？',
+      sukuna: '事先声明一下，你才是挑战者',
+      sukunaTs: '十种影子？那就一起上吧，反正结果一样',
+      higuruma: '法官先生，我可没打算接受你的审判',
+      toji: '术式都省了？那就用拳头说话',
+    },
+  },
+  sukuna: {
+    self: '不过是生在没有我的时代的匹夫罢了',
+    retort: {
+      gojo: '不过是生在没有我的时代的匹夫罢了',
+      sukuna: '本王可没有第二个',
+      sukunaTs: '区区十影，也配与本王同名',
+      higuruma: '你的判决，本王一概不受',
+      toji: '没有咒力的杂鱼，也敢挡在本王面前',
+    },
+  },
+  sukunaTs: {
+    self: '十种影子，尽归我手',
+    retort: {
+      gojo: '天上天下，唯我独尊——那就先从你斩起',
+      sukuna: '影中之影，今日便吞了你',
+      sukunaTs: '影子对影子，看谁的更深',
+      higuruma: '法庭？把法官一并斩了便是',
+      toji: '没有术式的身体，斩起来最省事',
+    },
+  },
+  higuruma: {
+    self: '开庭。被告，请陈述你的姓名与罪状',
+    retort: {
+      gojo: '开庭。被告，请陈述你的姓名与罪状',
+      sukuna: '判决无需被告同意',
+      sukunaTs: '藐视法庭，罪加一等',
+      higuruma: '同僚？那便由我来审你',
+      toji: '被告，天逆鉾不是免罪符',
+    },
+  },
+  toji: {
+    self: '术式什么的，我从来不需要',
+    retort: {
+      gojo: '六眼？那正好，我讨厌天才',
+      sukuna: '术式之王？我杀的就是这种',
+      sukunaTs: '十影的咒灵，也一并宰了',
+      higuruma: '法庭？我连判决一起斩了',
+      toji: '两个我？正好，一个也不留',
+    },
+  },
+};
+
+/* 当前进行中的开场对白：{ seq:[{side,text}], idx, chars, hold } */
+let introTalk = null;
 
 let player = null, enemy = null;
 let projectiles = [];
@@ -124,6 +211,7 @@ let G = { state:'menu', time:0, shake:0, flash:0, clash:false, clashT:0 };
 let keys = {};
 let joy = { active:false, id:null, ox:0, oy:0, x:0, y:0 };
 let holdAttack = false;
+let blueHoldBtn = false;   /* ★ 手机端长按「苍」按钮 */
 let selectedPlayerType = null;
 let selectedEnemyType = null;
 let btns = {};
@@ -143,12 +231,16 @@ function createFighter(type, x, y){
     alive: true,
     attackCd: 0, stun: 0, hitFlash: 0,
     kbx: 0, kby: 0, clashDmg: 0,
-    infinity: false, blueFist: false, blueUsed: false, redUsed: false,
+    /* ★ 五条悟「无下限」默认开启（其余角色无此状态） */
+    infinity: type === 'gojo', blueFist: false, blueUsed: false, redUsed: false,
+    blueCharge: 0,                 /* ★ 长按苍的蓄力计时 */
+    blueSlow: 0, blueSlowMul: 1,   /* ★ 被吸附型苍减速的剩余时间 / 倍率 */
     brainDamaged: false,
-    cd: { blue:0, red:0, purple:0, domain:0, reverse:0, fire:0, dismantle:0, nue:0, dog:0, maho:0, tobi:0, space:0, shinuchi:0, sentence:0 },
+    cd: { blue:0, red:0, purple:0, domain:0, reverse:0, fire:0, dismantle:0, nue:0, dog:0, maho:0, tobi:0, space:0, shinuchi:0, sentence:0, heaven:0, chain:0, fly:0 },
     domainLock: 0,
     skillLock: 0,   /* 审判：术式禁用剩余时间 */
     sentence: 0,    /* 死刑：受到伤害提升剩余时间 */
+    pull: null,     /* ★ 万里锁：正在被拖拽 { src, x0, y0, tx, ty, t, dur } */
     domain: null,
     mahoSummoned: false,   // 是否召唤过魔虚罗
     mahoDied: false,       // 召唤的魔虚罗是否已陨落
@@ -265,14 +357,88 @@ function startGame(pType, eType){
 
   renderControls();
   updateHUDElements();
+  updateTips();
   updateHUD();
+  startIntro();          /* ★ 开场对白：打字机逐字输出，播完才进入战斗 */
+}
+
+/* 底部操作提示：按当前角色的实际技能生成（无领域/无反转的角色不会出现错误提示） */
+function updateTips(){
+  if (!tipsEl || !player) return;
+  const list = SKILL_SETS[player.type] || [];
+  const parts = ['WASD / 方向键 移动'];
+  for (const s of list){
+    if (s.act === 'attack') continue;
+    parts.push(s.label + ' ' + s.sub);
+  }
+  /* ★ 五条悟专属提示：长按苍 → 吸附型引力球 → 再接赫 = 大范围茈 */
+  if (player.type === 'gojo') parts.push('长按 Q：苍·吸附 → 再按 E 赫 → 大范围茈');
+  tipsEl.innerHTML = parts.join(' · ') + '<br>手机：左侧拖动移动，右下按钮释放术式';
+}
+
+/* ══════════════════════════════════════════
+   开场对白（角色头顶 · 打字机逐字）
+   ══════════════════════════════════════════ */
+function buildIntro(pType, eType){
+  const seq = [];
+  const A = INTRO_QUOTES[pType], B = INTRO_QUOTES[eType];
+  if (A) seq.push({ side:'player', text: A.self });
+  if (B) seq.push({ side:'enemy', text: (B.retort && B.retort[pType]) || B.self });
+  return seq.filter(l => !!l.text);
+}
+
+function startIntro(){
+  const seq = buildIntro(player.type, enemy.type);
+  if (!seq.length){ introTalk = null; G.state = 'playing'; return; }
+  introTalk = { seq, idx:0, chars:0, hold:0 };
+  G.state = 'intro';
+}
+
+function endIntro(){
+  introTalk = null;
+  G.state = 'playing';
+  updateCamera();
+}
+
+function advanceIntro(){
+  if (!introTalk) return;
+  introTalk.idx++;
+  introTalk.chars = 0;
+  introTalk.hold = 0;
+  if (introTalk.idx >= introTalk.seq.length) endIntro();
+}
+
+/* 点击 / 按键：先补完当前句，再推进到下一句 */
+function skipIntro(){
+  if (!introTalk) return;
+  const cur = introTalk.seq[introTalk.idx];
+  if (!cur){ endIntro(); return; }
+  if (introTalk.chars < cur.text.length){
+    introTalk.chars = cur.text.length;
+    introTalk.hold = 0;
+  } else {
+    advanceIntro();
+  }
+}
+
+function updateIntro(dt){
+  if (!introTalk) return;
+  const cur = introTalk.seq[introTalk.idx];
+  if (!cur){ endIntro(); return; }
+  if (introTalk.chars < cur.text.length){
+    introTalk.chars = Math.min(cur.text.length, introTalk.chars + dt * INTRO_CPS);
+  } else {
+    introTalk.hold += dt;
+    if (introTalk.hold >= INTRO_HOLD) advanceIntro();
+  }
 }
 
 /* 角色主题色（HUD 名牌 / 选人浮层共用） */
 const NAME_COLORS = {
   gojo: '#9fd8ff', sukunaTs: '#c9a4ff', higuruma: '#ffd76a', sukuna: '#ff8a8a',
+  toji: '#dfe4ea',
 };
-function nameColor(type){ return NAME_COLORS[type] || '#dfe9f5'; }
+function nameColor(type){ return NAME_COLORS[type] || '#e7eaee'; }
 
 function updateHUDElements(){
   const pPanel = document.querySelector('.panel.player');
@@ -322,6 +488,12 @@ const SKILL_SETS = {
     { act:'reverse',  label:'反转术式',  sub:'H', cls:'green' },
     { act:'attack',   label:'法槌',      sub:'J', cls:'attackbtn' },
   ],
+  toji: [
+    { act:'heaven',  label:'天逆鉾',    sub:'Q', cls:'gold' },
+    { act:'chain',   label:'万里锁',    sub:'E', cls:'shadow' },
+    { act:'fly',     label:'蝇头',      sub:'T', cls:'fly' },
+    { act:'attack',  label:'体术',      sub:'J', cls:'attackbtn' },
+  ],
 };
 
 /* ══════════════════════════════════════════
@@ -332,11 +504,11 @@ const CHAR_INFO = {
     title: '五条悟',
     stats: 'HP 1200 · 咒力 145 · 速度 270 · 攻击 32',
     skills: [
-      ['无下限', 'F · 减免 65% 受到的伤害，持续消耗咒力'],
+      ['无下限', 'F · 默认开启；减免 65% 受到的伤害，持续消耗咒力'],
       ['苍拳', 'G · 普攻强化为冲拳，每次消耗咒力'],
-      ['苍', 'Q · 引力球，吸附并拉扯敌人'],
-      ['赫', 'E · 斥力球，命中强力击退'],
-      ['茈', 'R · 需先释放 苍+赫，贯穿大伤害'],
+      ['苍', 'Q · 引力球，吸附并拉扯敌人；长按 → 吸附型：滞空、把敌人拉向球心并减速'],
+      ['赫', 'E · 斥力球，命中强力击退；场上若有吸附型苍，则被其牵引'],
+      ['茈', 'R · 需先释放 苍+赫，贯穿大伤害；赫 撞上吸附型苍 → 范围 480 紫色冲击波「茈」'],
       ['无量空处', '空格 · 领域，僵直敌方并封印领域 20 秒'],
       ['反转术式', 'H · 回复生命 / 修复受损大脑'],
       ['破脑', 'P · 自伤以重置领域冷却'],
@@ -378,6 +550,17 @@ const CHAR_INFO = {
       ['追诉 / 审判', '有人被宣告死刑时自身移速 +20%；领域内自身移速 +30%、受伤 −30%'],
     ],
   },
+  toji: {
+    title: '伏黑甚尔',
+    stats: 'HP 2000 · 咒力 100 · 速度 355 · 体术 78',
+    skills: [
+      ['体术', 'J · 近战重击 78 伤害 / 0.30s（触及约 134），出拳自带前压步持续压迫'],
+      ['天逆鉾', 'Q · 28 咒力 / 7s · 远程弧形闪光 130 伤害，命中后目标 5 秒内无法使用术式与领域'],
+      ['万里锁', 'E · 35 咒力 / 10s · 900 距离钩中敌人：60 伤害 + 拽向自己 + 眩晕 3 秒（对抗远程的核心）'],
+      ['蝇头', 'T · 18 咒力 / 5s · 朝敌方扇形扑出 4 只棕黄小飞虫（70 HP、无攻击），替自己挡弹幕'],
+      ['天与咒缚', '被动 · 速度 355 全场最高；一切伤害 −25%；无法被任何领域「选中」；没有反转术式'],
+    ],
+  },
 };
 
 let lastSelect = { side: null, char: null };
@@ -403,11 +586,23 @@ function showCharInfo(side, char){
   box.classList.remove('hidden');
 }
 
+/* ★ 按键排布优先级：数值越大越靠后（= 越靠近右下角的普攻键 / 拇指自然落点）
+   1 = 状态类与低频术式（最上排）  2 = 召唤类中频  3 = 高频输出与保命  9 = 普攻（固定最后） */
+const SKILL_PRIORITY = {
+  domain:1, infinity:1, brainbreak:1, bluefist:1,
+  dog:2, tobi:2, mahoraga:2, fly:2,
+  reverse:3, blue:3, red:3, purple:3, fire:3, dismantle:3,
+  space:3, nue:3, shinuchi:3, sentence:3, heaven:3, chain:3,
+  attack:9,
+};
+const skillPriority = s => (SKILL_PRIORITY[s.act] !== undefined ? SKILL_PRIORITY[s.act] : 2);
+
 function renderControls(){
   ctrlEl.innerHTML = '';
   btns = {};
-  const list = SKILL_SETS[player.type];
-  const cols = player.type === 'gojo' ? 4 : 3;
+  /* ★ 越常用的技能越靠近右下角（拇指落点），普攻单独占一行、贴右下角 */
+  const list = (SKILL_SETS[player.type] || []).slice().sort((a, b) => skillPriority(a) - skillPriority(b));
+  const cols = 4;
   ctrlEl.style.gridTemplateColumns = `repeat(${cols}, auto)`;
 
   for (const s of list){
@@ -415,6 +610,17 @@ function renderControls(){
     btn.className = 'skill' + (s.cls ? ' ' + s.cls : '');
     btn.dataset.act = s.act;
     btn.innerHTML = `${s.label}<span class="sub">${s.sub}</span>`;
+    /* ★ CD 动画：扇形遮罩 + 剩余秒数 */
+    const mask = document.createElement('span');
+    mask.className = 'cdmask';
+    btn.appendChild(mask);
+    const cdtxt = document.createElement('span');
+    cdtxt.className = 'cdtxt';
+    btn.appendChild(cdtxt);
+    btn._cdtxt = cdtxt;
+    btn.style.setProperty('--p', 0);
+    /* ★ 普攻键固定落在最右列的第一个空位：紧贴右下角，并与上方技能对齐 */
+    if (s.act === 'attack') btn.style.gridColumn = cols + ' / ' + (cols + 1);
     btn.addEventListener('pointerdown', e => {
       e.preventDefault(); e.stopPropagation();
       hideTips();
@@ -427,6 +633,15 @@ function renderControls(){
       btn.addEventListener('pointerup', off);
       btn.addEventListener('pointercancel', off);
       btn.addEventListener('pointerleave', off);
+    }
+    if (s.act === 'blue'){
+      /* ★ 手机端：长按「苍」按钮同样能蓄力成吸附型引力球 */
+      const onB  = () => { blueHoldBtn = true; };
+      const offB = () => { blueHoldBtn = false; };
+      btn.addEventListener('pointerdown', onB);
+      btn.addEventListener('pointerup', offB);
+      btn.addEventListener('pointercancel', offB);
+      btn.addEventListener('pointerleave', offB);
     }
     ctrlEl.appendChild(btn);
     btns[s.act] = btn;
@@ -443,7 +658,7 @@ function handleAction(act){
   switch(act){
     case 'attack':     basicAttack(player, enemy); break;
     case 'domain':     castDomain(player, enemy); break;
-    case 'reverse':    castReverse(player); break;
+    case 'reverse':    if (hasReverse(player.type)) castReverse(player); break;
     case 'infinity':   toggleInfinity(player); break;
     case 'bluefist':   toggleBlueFist(player); break;
     case 'blue':       gojoBlue(player, enemy); break;
@@ -459,52 +674,47 @@ function handleAction(act){
     case 'brainbreak': brainBreak(player); break;
     case 'shinuchi':   higurumaShinuchi(player, enemy); break;
     case 'sentence':   higurumaSentence(player); break;
+    case 'heaven':     tojiHeavenSpear(player, enemy); break;
+    case 'chain':      tojiChain(player, enemy); break;
+    case 'fly':        tojiFlyHead(player); break;
   }
 }
 
 /* ══════════════════════════════════════════
    输入
    ══════════════════════════════════════════ */
+/* ★ 按键 → 技能动作映射：直接由 SKILL_SETS 推导
+   （每个技能的 sub 就是它的按键，新增角色/技能无需再改按键逻辑） */
+const KEY_ACTION = {};
+(function buildKeyAction(){
+  for (const type in SKILL_SETS){
+    const map = {};
+    for (const s of SKILL_SETS[type]){
+      const raw = (s.sub || '').toLowerCase();
+      if (!raw) continue;
+      map[raw === 'space' ? ' ' : raw] = s.act;
+    }
+    KEY_ACTION[type] = map;
+  }
+})();
+
 window.addEventListener('keydown', e => {
   const k = e.key.toLowerCase();
   if ([' ','arrowup','arrowdown','arrowleft','arrowright'].includes(k)) e.preventDefault();
   if (e.repeat) return;
   keys[k] = true;
+  /* ★ 开场对白：任意键补完当前句 / 推进 */
+  if (G.state === 'intro'){ skipIntro(); return; }
   if (G.state !== 'playing' || !player || !player.alive) return;
-  switch(k){
-    case 'j': handleAction('attack'); break;
-    case 'q':
-      if (player.type === 'gojo') handleAction('blue');
-      else if (player.type === 'sukuna') handleAction('dismantle');
-      else if (player.type === 'sukunaTs') handleAction('nue');
-      else if (player.type === 'higuruma') handleAction('shinuchi');
-      break;
-    case 'e':
-      if (player.type === 'gojo') handleAction('red');
-      else if (player.type === 'sukuna') handleAction('fire');
-      else if (player.type === 'sukunaTs') handleAction('dog');
-      else if (player.type === 'higuruma') handleAction('sentence');
-      break;
-    case 'r':
-      if (player.type === 'gojo') handleAction('purple');
-      else if (player.type === 'sukunaTs') handleAction('mahoraga');
-      break;
-    case 'f':
-      if (player.type === 'gojo') handleAction('infinity');
-      else if (player.type === 'sukunaTs') handleAction('space');
-      break;
-    case 'g': if (player.type === 'gojo') handleAction('bluefist'); break;
-    case 'h': handleAction('reverse'); break;
-    case 't': if (player.type === 'sukunaTs') handleAction('tobi'); break;
-    case 'p': if (player.type === 'gojo') handleAction('brainbreak'); break;
-    case ' ': handleAction('domain'); break;
-  }
+  const act = (KEY_ACTION[player.type] || {})[k];
+  if (act) handleAction(act);
   hideTips();
 });
 window.addEventListener('keyup', e => { keys[e.key.toLowerCase()] = false; });
-window.addEventListener('blur', () => { keys = {}; holdAttack = false; joy.x = joy.y = 0; });
+window.addEventListener('blur', () => { keys = {}; holdAttack = false; blueHoldBtn = false; joy.x = joy.y = 0; });
 
 canvas.addEventListener('pointerdown', e => {
+  if (G.state === 'intro'){ skipIntro(); return; }
   if (G.state !== 'playing') return;
   if (joy.id !== null) return;
   joy.id = e.pointerId; joy.active = true;
@@ -606,6 +816,7 @@ function inOwnHigurumaDomain(f){
 function moveSpeed(f){
   let spd = f.speed;
   if (f.sentence > 0) spd *= (1 - CFG.higuruma.sentenceSlow);   /* 被宣告死刑：减速 */
+  if (f.blueSlow > 0) spd *= (f.blueSlowMul || 1);              /* ★ 被吸附型苍减速 */
   if (f.type === 'higuruma'){
     if (inOwnHigurumaDomain(f)) spd *= CFG.higuruma.domainSpeedMul;
     const foe = f === player ? enemy : player;
@@ -615,7 +826,7 @@ function moveSpeed(f){
 }
 
 /* 普攻为「贴身近战」的角色（其余角色普攻为远程斩击） */
-const MELEE_TYPES = { gojo: true, higuruma: true };
+const MELEE_TYPES = { gojo: true, higuruma: true, toji: true };
 function isMeleeType(type){ return !!MELEE_TYPES[type]; }
 
 function basicAttack(attacker, target){
@@ -647,13 +858,18 @@ function basicAttack(attacker, target){
 
     attacker.attackCd = c.atkCd;
     addEffect({ type:'punch', x:attacker.x, y:attacker.y, ang:attacker.facing, t:0, life:0.16,
-      color: isGojo ? '#b4e6ff' : '#ffd76a' });
+      color: isGojo ? '#b4e6ff' : (attacker.type === 'toji' ? '#e6ebf1' : '#ffd76a') });
     if (isGojo && attacker.blueFist){
       /* ★ 苍拳冲拳：向前突进 + 能量冲拳特效 */
       const la = attacker.facing;
       attacker.x = clamp(attacker.x + Math.cos(la)*14, attacker.r, WORLD.w-attacker.r);
       attacker.y = clamp(attacker.y + Math.sin(la)*14, attacker.r, WORLD.h-attacker.r);
       addEffect({ type:'bluepunch', x:attacker.x, y:attacker.y, ang:la, t:0, life:0.24 });
+    } else if (attacker.type === 'toji'){
+      /* ★ 甚尔：出拳带前压步，贴身不脱节（对抗远程时持续压迫） */
+      const la = attacker.facing;
+      attacker.x = clamp(attacker.x + Math.cos(la)*14, attacker.r, WORLD.w-attacker.r);
+      attacker.y = clamp(attacker.y + Math.sin(la)*14, attacker.r, WORLD.h-attacker.r);
     }
 
     const d = dist(attacker, target);
@@ -684,9 +900,16 @@ function basicAttack(attacker, target){
   }
 }
 
+/* 是否掌握反转术式（伏黑甚尔没有） */
+function hasReverse(type){
+  const c = CFG[type];
+  return !!(c && finite(c.reverseCost) && finite(c.reverseHeal));
+}
+
 function castReverse(f){
   if (!f || !f.alive || f.stun > 0) return;
   const c = CFG[f.type];
+  if (!hasReverse(f.type)) return;
   if (f.cd.reverse > 0 || f.ce < c.reverseCost) return;
   if (f.hp >= f.maxHp && !f.brainDamaged) return;
 
@@ -721,6 +944,13 @@ function castDomain(f, target){
         text:'大脑受损 · 需反转术式修复', color:'#ff6b6b', size:14 });
     return;
   }
+  if (!c.domainName){           /* ★ 没有领域的角色（伏黑甚尔）无法展开领域 */
+    if (f === player)
+      addEffect({ type:'text', x:f.x, y:f.y-60, t:0, life:1.1,
+        text:'天与咒缚 · 无法展开领域', color:'#dfe4ea', size:14 });
+    return;
+  }
+  if (f.skillLock > 0) return;  /* ★ 术式被封印时无法展开领域 */
   if (f.cd.domain > 0 || f.ce < c.domainCost || f.domain) return;
   if (f.domainLock > 0) return;
 
@@ -743,6 +973,36 @@ function castDomain(f, target){
 /* ══════════════════════════════════════════
    五条悟术式
    ══════════════════════════════════════════ */
+/* ★ 玩家是否正按住「苍」键（键盘 Q / 手机按钮） */
+function blueKeyHeld(){ return !!keys['q'] || blueHoldBtn; }
+
+/* ★ 长按「苍」：把刚刚发射的普通苍升级为「吸附型引力球」
+   （点按 = 普通苍；按住 ≥ blueHoldTime = 引力球） */
+function tickBlueCharge(p, dt){
+  if (!p) return;
+  if (p.type !== 'gojo' || !blueKeyHeld()){ p.blueCharge = 0; return; }
+  p.blueCharge = (p.blueCharge || 0) + dt;
+  const c = CFG.gojo;
+  if (p.blueCharge < c.blueHoldTime) return;
+
+  let orb = null;
+  for (const pr of projectiles){
+    if (!pr || pr.dead || pr.type !== 'blue' || pr.owner !== p || pr.charged) continue;
+    if ((pr.age || 0) > 0.6) continue;               /* 只升级刚出手的那一颗 */
+    if (!orb || (pr.age || 0) < (orb.age || 0)) orb = pr;
+  }
+  if (!orb) return;
+
+  orb.charged = true;
+  orb.life = Math.max(orb.life, c.blueChargedLife);
+  orb.maxLife = c.blueChargedLife;
+  orb.r = 26;
+  orb.vx *= 0.3; orb.vy *= 0.3;                      /* 急停，化作滞空引力球 */
+  addEffect({ type:'ring', x:orb.x, y:orb.y, t:0, life:0.5, r0:12, r1:120, color:'#7fd0ff', width:5 });
+  addEffect({ type:'text', x:p.x, y:p.y-74, t:0, life:1.1, text:'苍 · 吸附', color:'#8fd4ff', size:18 });
+  p.blueCharge = 0;                                  /* 一颗苍只升级一次 */
+}
+
 function gojoBlue(gojo, target){
   const c = CFG.gojo;
   if (!gojo.alive || gojo.stun > 0 || gojo.cd.blue > 0 || gojo.ce < c.blueCost) return;
@@ -756,6 +1016,7 @@ function gojoBlue(gojo, target){
     x:gojo.x+Math.cos(ang)*32, y:gojo.y+Math.sin(ang)*32,
     vx:Math.cos(ang)*520, vy:Math.sin(ang)*520,
     r:20, life:3.0, maxLife:3.0, age:0,
+    charged:false,        /* ★ 长按后由 tickBlueCharge 升级 */
     damage:c.blueDmg, hitCd:0,
   });
   addEffect({ type:'ring', x:gojo.x, y:gojo.y, t:0, life:0.3, r0:8, r1:56, color:'#4aa8ff', width:3 });
@@ -769,13 +1030,49 @@ function gojoRed(gojo, target){
   gojo.redUsed = true;
   const aim = acquireAim(gojo, target);
   const ang = Math.atan2(aim.y-gojo.y, aim.x-gojo.x);
+  /* ★ 场上若存在「吸附型苍」，赫会被它牵引；两者相撞 → 大范围茈爆炸 */
+  let orb = null;
+  for (const pr of projectiles){
+    if (!pr || pr.dead || pr.type !== 'blue' || !pr.charged || pr.owner !== gojo) continue;
+    if (!orb || (pr.age || 0) > (orb.age || 0)) orb = pr;
+  }
   projectiles.push({
     type:'red', owner:gojo,
     x:gojo.x+Math.cos(ang)*34, y:gojo.y+Math.sin(ang)*34,
     vx:Math.cos(ang)*820, vy:Math.sin(ang)*820,
-    r:30, life:1.2, damage:c.redDmg,
+    r:30, life: orb ? 3.0 : 1.2, damage:c.redDmg,
+    homingBlue: orb,
   });
+  if (orb) addEffect({ type:'text', x:gojo.x, y:gojo.y-74, t:0, life:1.1,
+    text:'赫 → 苍 · 引力共鸣', color:'#ffb37a', size:16 });
   addEffect({ type:'ring', x:gojo.x, y:gojo.y, t:0, life:0.35, r0:8, r1:70, color:'#ff4a4a', width:4 });
+}
+
+/* ★ 赫撞上吸附型苍：大范围（480）紫色冲击波「茈」 */
+function purpleBlast(x, y, owner){
+  const c = CFG.gojo;
+  const R = c.purpleBlastR;
+  const foe = owner === player ? enemy : player;
+
+  addEffect({ type:'bigpurple', x, y, t:0, life:0.85, r0:24, r1:R });
+  addEffect({ type:'ring', x, y, t:0, life:0.6, r0:20, r1:R*0.6, color:'#e2c4ff', width:14 });
+  addEffect({ type:'text', x, y:y-96, t:0, life:1.3, text:'虚式 · 茈', color:'#d9a6ff', size:26 });
+  spawnBurst(x, y, '#c07bff', 32, 260, 900, 3, 8);
+  spawnBurst(x, y, '#ffffff', 16, 180, 640, 2, 6);
+  G.shake = Math.max(G.shake, 34);
+  G.flash = Math.max(G.flash, 0.5);
+
+  if (foe && foe.alive && Math.hypot(foe.x - x, foe.y - y) < R + foe.r){
+    damage(foe, c.purpleBlastDmg);
+    const a = Math.atan2(foe.y - y, foe.x - x);
+    foe.kbx = Math.cos(a) * c.purpleBlastKb;
+    foe.kby = Math.sin(a) * c.purpleBlastKb;
+  }
+  for (const s of summons){
+    if (!s || s.owner !== foe) continue;
+    if (!finite(s.x) || !finite(s.y) || s.hp <= 0) continue;
+    if (Math.hypot(s.x - x, s.y - y) < R + s.r) damageSummon(s, c.purpleBlastDmg, 'purple');
+  }
 }
 
 function gojoPurple(gojo, target){
@@ -1126,6 +1423,34 @@ function aiHiguruma(ai, target, d, ang){
            y: Math.sin(ang)*m + Math.sin(ang+Math.PI/2)*strafe };
 }
 
+/* ★ 伏黑甚尔 AI：贴身压制，万里锁留人，天逆鉾封术式 */
+function aiToji(ai, target, d, ang){
+  const c = CFG.toji;
+
+  /* 万里锁：中远距离先钩住，把敌人拽进自己的近战节奏 */
+  if (ai.cd.chain <= 0 && ai.ce >= c.chainCost && d > 120 && d < c.chainRange) tojiChain(ai, target);
+
+  /* 天逆鉾：优先在敌人准备开领域 / 术式未被封时封印他 */
+  if (ai.cd.heaven <= 0 && ai.ce >= c.heavenCost && d < 640 &&
+      (target.skillLock <= 0 || target.domain || d < 340)) tojiHeavenSpear(ai, target);
+
+  /* 蝇头：撒出一群小虫子骚扰、挡刀 */
+  if (ai.cd.fly <= 0 && ai.ce >= c.flyCost && d > 90) tojiFlyHead(ai);
+
+  /* 体术：进入拳脚范围就出手 */
+  if (ai.attackCd <= 0 && d < ai.r + target.r + c.atkRange + 16) basicAttack(ai, target);
+
+  /* 走位：被钩住就猛压，否则贴身缠斗 */
+  let m, strafe;
+  if (target.stun > 0){ m = 1; strafe = 0; }
+  else if (d > 220){ m = 1; strafe = Math.sin(G.time*3.0)*0.2; }
+  else if (d < 44){ m = -0.15; strafe = Math.sin(G.time*2.4)*0.5; }
+  else { m = 0.1; strafe = Math.sin(G.time*2.4)*0.55; }
+
+  return { x: Math.cos(ang)*m + Math.cos(ang+Math.PI/2)*strafe,
+           y: Math.sin(ang)*m + Math.sin(ang+Math.PI/2)*strafe };
+}
+
 /* ★ 被审判封印术式时的 AI 行为：只能走位 + 普攻 */
 function aiMoveOnly(ai, target, d, ang){
   const c = CFG[ai.type];
@@ -1142,12 +1467,115 @@ function aiMoveOnly(ai, target, d, ang){
 }
 
 /* ══════════════════════════════════════════
+   伏黑甚尔术式（天与咒缚 · 咒具）
+   ══════════════════════════════════════════ */
+/* ★ 天逆鉾：白色弧形闪光，命中后目标 5 秒无法使用术式与领域 */
+function tojiHeavenSpear(t, target){
+  if (!t || !t.alive || t.stun > 0) return;
+  const c = CFG.toji;
+  if (t.cd.heaven > 0 || t.ce < c.heavenCost) return;
+  const aim = acquireAim(t, target);
+  if (!aim) return;
+  const ang = Math.atan2(aim.y - t.y, aim.x - t.x);
+  if (!finite(ang)) return;
+
+  t.ce -= c.heavenCost;
+  t.cd.heaven = c.heavenCd;
+  t.facing = ang;
+  projectiles.push({
+    type:'heaven', owner:t,
+    x: t.x + Math.cos(ang)*(t.r + 16), y: t.y + Math.sin(ang)*(t.r + 16),
+    vx: Math.cos(ang)*c.heavenSpeed, vy: Math.sin(ang)*c.heavenSpeed,
+    r: 24, life: 0.9, damage: c.heavenDmg, rot: ang, color:'#ffffff',
+    pierce: false, hitCd: 0, age: 0, seal: c.heavenSeal,
+  });
+  addEffect({ type:'ring', x:t.x, y:t.y, t:0, life:0.35, r0:8, r1:58, color:'#ffffff', width:3 });
+  addEffect({ type:'text', x:t.x, y:t.y-72, t:0, life:0.9, text:'天逆鉾', color:'#eef2f6', size:16 });
+  G.shake = Math.max(G.shake, 8);
+}
+
+/* ★ 万里锁：锁链钩中敌人 → 拽向甚尔 + 3 秒眩晕 */
+function tojiChain(t, target){
+  if (!t || !t.alive || t.stun > 0) return;
+  const c = CFG.toji;
+  if (t.cd.chain > 0 || t.ce < c.chainCost) return;
+  const aim = acquireAim(t, target);
+  if (!aim) return;
+  const ang = Math.atan2(aim.y - t.y, aim.x - t.x);
+  if (!finite(ang)) return;
+
+  t.ce -= c.chainCost;
+  t.cd.chain = c.chainCd;
+  t.facing = ang;
+  projectiles.push({
+    type:'chain', owner:t,
+    x: t.x + Math.cos(ang)*(t.r + 12), y: t.y + Math.sin(ang)*(t.r + 12),
+    vx: Math.cos(ang)*c.chainSpeed, vy: Math.sin(ang)*c.chainSpeed,
+    r: 16, life: 1.5, damage: c.chainDmg, rot: ang, color:'#cdd5de',
+    pierce: false, hitCd: 0, age: 0, stun: c.chainStun, pullDur: c.chainPull,
+  });
+  addEffect({ type:'text', x:t.x, y:t.y-72, t:0, life:0.9, text:'万里锁', color:'#dfe4ea', size:16 });
+}
+
+/* ★ 蝇头：与脱兔同类的小型召唤物（棕黄），每次 4 只、无上限、无攻击 */
+function tojiFlyHead(t){
+  if (!t || !t.alive || t.stun > 0) return;
+  const c = CFG.toji;
+  if (t.cd.fly > 0 || t.ce < c.flyCost) return;
+  t.ce -= c.flyCost;
+  t.cd.fly = c.flyCd;
+
+  const facing = finite(t.facing) ? t.facing : 0;
+  /* ★ 朝敌方呈扇形扑出（挡在甚尔身前，替他吃远程弹幕） */
+  for (let i = 0; i < c.flyCount; i++){
+    const a = facing + (i - (c.flyCount - 1) / 2) * 0.45 + rnd(-0.12, 0.12);
+    summons.push({
+      type: 'flyhead',
+      owner: t,
+      x: t.x + Math.cos(a) * 52,
+      y: t.y + Math.sin(a) * 52,
+      r: 9,
+      speed: c.flySpeed,
+      life: c.flyDur, maxLife: c.flyDur,
+      hp: c.flyHp, maxHp: c.flyHp,
+      damage: 0,          /* 无攻击手段 */
+      hitCd: 0, hitFlash: 0,
+      attackInterval: 999,
+      angle: a,
+    });
+  }
+  addEffect({ type:'ring', x:t.x, y:t.y, t:0, life:0.4, r0:8, r1:70, color:'#d8a24a', width:3 });
+  addEffect({ type:'text', x:t.x, y:t.y-58, t:0, life:0.9, text:'蝇头', color:'#e8c07a', size:18 });
+}
+
+/* ★ 拖拽结算：把目标沿直线拉向施法者（在双方位移之后调用） */
+function applyPull(f, dt){
+  if (!f || !f.alive || !f.pull) return;
+  const p = f.pull;
+  p.t += dt;
+  const k = Math.min(1, p.t / p.dur);
+  const e = k*k*(3 - 2*k);
+  const s = p.src;
+  if (s && s.alive){
+    const a = Math.atan2(f.y - s.y, f.x - s.x);
+    const stop = s.r + f.r + 6;
+    p.tx = s.x + Math.cos(a)*stop;
+    p.ty = s.y + Math.sin(a)*stop;
+  }
+  f.x = clamp(p.x0 + (p.tx - p.x0)*e, f.r, WORLD.w - f.r);
+  f.y = clamp(p.y0 + (p.ty - p.y0)*e, f.r, WORLD.h - f.r);
+  if (k >= 1) f.pull = null;
+}
+
+/* ══════════════════════════════════════════
    伤害
    ══════════════════════════════════════════ */
 function damage(target, amount, silent){
   if (!target || !target.alive) return;
   let d = amount;
   if (target.type === 'gojo' && target.infinity) d *= (1 - CFG.gojo.infDR);
+  /* ★ 天与咒缚：伏黑甚尔没有咒力，一切伤害对其效果降低 */
+  if (target.type === 'toji') d *= (1 - CFG.toji.bodyDR);
   /* ★ 死刑：受到伤害 +50% */
   if (target.sentence > 0) d *= (1 + CFG.higuruma.sentenceAmp);
   /* ★ 诛伏赐死：领域内自身受到的伤害 -30% */
@@ -1156,8 +1584,7 @@ function damage(target, amount, silent){
   target.hitFlash = 0.14;
 
   const other = target === player ? enemy : player;
-  /* ★ 「诛伏赐死」是判决而非结界，不参与领域对拼的耐久消耗（否则 0 伤害的它必输） */
-  if (target.domain && target.domain.type !== 'higuruma' && other && other.domain) target.clashDmg += d;
+  if (target.domain && other && other.domain) target.clashDmg += d;
 
   if (!silent) addEffect({ type:'text', x:target.x+rnd(-14,14), y:target.y-42, t:0, life:0.7,
     text: Math.round(d), color:'#ffd76a', size:14 });
@@ -1216,7 +1643,7 @@ function endGame(result){
     if (!overlayEl || !t || !s) return;
     if (result === 'win'){
       t.textContent = '胜 利';
-      t.style.color = '#9fd8ff';
+      t.style.color = '#eef2f6';
       s.textContent = '「天上天下，唯我独尊。」';
     } else {
       t.textContent = '败 北';
@@ -1254,12 +1681,23 @@ function update(dt){
   G.flash = Math.max(0, G.flash - dt*2.2);
   updateEffects(dt);
 
+  /* ★ 开场对白：世界继续运转，但不结算战斗 */
+  if (G.state === 'intro'){
+    G.time += dt;
+    updateIntro(dt);
+    updateCamera();
+    return;
+  }
+
   if (G.state !== 'playing') return;
   if (!player || !enemy) return;
   G.time += dt;
 
   updatePlayer(dt);
   updateAI(dt);
+  /* ★ 万里锁拖拽：在双方位移结算之后接管位置 */
+  applyPull(player, dt);
+  applyPull(enemy, dt);
   updateProjectiles(dt);
   updateSummons(dt);
   updateDomains(dt);
@@ -1270,9 +1708,20 @@ function update(dt){
 
 function updateCamera(){
   if (!player) return;
+  /* ★ 开场对白期间：拉远镜头，把两人同时纳入取景 */
+  const framing = !!(introTalk && enemy);
+  if (framing){
+    const needW = Math.abs(enemy.x - player.x) + 560;
+    const needH = 560;
+    scale = clamp(Math.min(W/needW, H/needH), 0.30, baseScale);
+  } else {
+    scale = baseScale;
+  }
   const vw = W/scale, vh = H/scale;
-  const tx = player.x - vw/2;
-  const ty = player.y - vh/2;
+  const cx = framing ? (player.x + enemy.x)/2 : player.x;
+  const cy = framing ? (player.y + enemy.y)/2 : player.y;
+  const tx = cx - vw/2;
+  const ty = cy - vh/2;
   cam.x = WORLD.w > vw ? clamp(tx, 0, WORLD.w - vw) : (WORLD.w - vw)/2;
   cam.y = WORLD.h > vh ? clamp(ty, 0, WORLD.h - vh) : (WORLD.h - vh)/2;
 }
@@ -1287,6 +1736,7 @@ function updatePlayer(dt){
   if (p.domainLock > 0) p.domainLock -= dt;
   if (p.skillLock > 0) p.skillLock -= dt;
   if (p.sentence > 0) p.sentence -= dt;
+  if (p.blueSlow > 0) p.blueSlow -= dt;
   for (const k in p.cd) if (p.cd[k] > 0) p.cd[k] = Math.max(0, p.cd[k] - dt);
   if (p.attackCd > 0) p.attackCd -= dt;
 
@@ -1329,6 +1779,9 @@ function updatePlayer(dt){
 
   p.ce = Math.min(p.maxCe, p.ce + c.ceRegen*dt);
 
+  /* ★ 长按「苍」蓄力：把刚发射的苍升级为吸附型引力球 */
+  if (p.type === 'gojo') tickBlueCharge(p, dt);
+
   if (keys['j'] || holdAttack) basicAttack(p, enemy);
 }
 
@@ -1341,6 +1794,7 @@ function updateAI(dt){
   if (ai.domainLock > 0) ai.domainLock -= dt;
   if (ai.skillLock > 0) ai.skillLock -= dt;
   if (ai.sentence > 0) ai.sentence -= dt;
+  if (ai.blueSlow > 0) ai.blueSlow -= dt;
   for (const k in ai.cd) if (ai.cd[k] > 0) ai.cd[k] = Math.max(0, ai.cd[k] - dt);
   if (ai.attackCd > 0) ai.attackCd -= dt;
   ai.ce = Math.min(ai.maxCe, ai.ce + c.ceRegen*dt);
@@ -1374,11 +1828,11 @@ function updateAI(dt){
     mv = aiMoveOnly(ai, target, d, ang);
   } else {
     /* ① 保命优先：大脑受损 / 残血时先修反转术式 */
-    const lowHp = ai.hp < ai.maxHp * c.reverseThreshold;
+    const lowHp = hasReverse(ai.type) && ai.hp < ai.maxHp * c.reverseThreshold;
     if ((ai.brainDamaged || lowHp) && ai.cd.reverse <= 0 && ai.ce >= c.reverseCost) castReverse(ai);
 
     /* ② 玩家展开领域 → 立刻同步展开对冲 */
-    if (player.domain && !enemy.domain && enemy.domainLock <= 0 && enemy.ce >= c.domainCost && !enemy.brainDamaged){
+    if (c.domainName && player.domain && !enemy.domain && enemy.domainLock <= 0 && enemy.ce >= c.domainCost && !enemy.brainDamaged){
       enemy.cd.domain = 0;
       castDomain(enemy, player);
       addEffect({ type:'text', x:enemy.x, y:enemy.y-118, t:0, life:1.8,
@@ -1389,6 +1843,7 @@ function updateAI(dt){
     if (ai.type === 'gojo') mv = aiGojo(ai, target, d, ang);
     else if (ai.type === 'sukuna') mv = aiSukuna(ai, target, d, ang);
     else if (ai.type === 'higuruma') mv = aiHiguruma(ai, target, d, ang);
+    else if (ai.type === 'toji') mv = aiToji(ai, target, d, ang);
     else mv = aiSukunaTs(ai, target, d, ang);
   }
 
@@ -1602,7 +2057,7 @@ function projectileHitsSummon(pr){
 function updateProjectiles(dt){
   for (let i = projectiles.length-1; i >= 0; i--){
     const pr = projectiles[i];
-    if (!pr){ projectiles.splice(i,1); continue; }
+    if (!pr || pr.dead){ projectiles.splice(i,1); continue; }
     pr.age = (pr.age || 0) + dt;
     pr.life -= dt;
 
@@ -1611,21 +2066,48 @@ function updateProjectiles(dt){
 
     /* 苍 */
     if (pr.type === 'blue'){
-      if (pr.age > 0.42){
+      const gc = CFG.gojo;
+      if (pr.charged){
+        /* ★ 吸附型苍：急停滞空，化作引力球 */
+        const drag = Math.pow(0.004, dt);
+        pr.vx *= drag; pr.vy *= drag;
+        if (Math.random() < 0.55){
+          const sa = rnd(0, TAU), sr = rnd(26, 96);
+          addEffect({ type:'spark', x:pr.x + Math.cos(sa)*sr, y:pr.y + Math.sin(sa)*sr, t:0, life:0.34,
+            vx:-Math.cos(sa)*rnd(80,220), vy:-Math.sin(sa)*rnd(80,220), color:'#8fd4ff', size:3 });
+        }
+      } else if (pr.age > 0.42){
         const drag = Math.pow(0.06, dt);
         pr.vx *= drag; pr.vy *= drag;
       }
       pr.x += pr.vx*dt;
       pr.y += pr.vy*dt;
 
+      /* ★ 引力中心：普通苍拉向施法者，吸附型苍拉向球体本身 */
+      const anchor = pr.charged ? pr : owner;
       if (owner && owner.alive && target && target.alive){
-        const R = 400;
-        const dd = Math.hypot(owner.x - target.x, owner.y - target.y);
+        const R = pr.charged ? gc.blueChargedR : 400;
+        const dd = Math.hypot(anchor.x - target.x, anchor.y - target.y);
         if (dd < R && dd > 1){
-          const a = Math.atan2(owner.y - target.y, owner.x - target.x);
-          const strength = (1 - dd/R) * 1300;
+          const a = Math.atan2(anchor.y - target.y, anchor.x - target.x);
+          const strength = (1 - dd/R) * (pr.charged ? gc.blueChargedPull : 1300);
           target.x = clamp(target.x + Math.cos(a)*strength*dt, target.r, WORLD.w - target.r);
           target.y = clamp(target.y + Math.sin(a)*strength*dt, target.r, WORLD.h - target.r);
+        }
+        /* ★ 吸附型苍：持续减速 */
+        if (pr.charged){ target.blueSlow = 0.3; target.blueSlowMul = 1 - gc.blueChargedSlow; }
+      }
+      /* ★ 引力球同样拖拽敌方式神 */
+      if (pr.charged && owner){
+        for (const s of summons){
+          if (!s || s.owner === owner) continue;
+          if (!finite(s.x) || !finite(s.y) || s.hp <= 0) continue;
+          const dd = dist(pr, s);
+          if (dd >= gc.blueChargedR || dd <= 1) continue;
+          const a = Math.atan2(pr.y - s.y, pr.x - s.x);
+          const strength = (1 - dd/gc.blueChargedR) * gc.blueChargedPull;
+          s.x = clamp(s.x + Math.cos(a)*strength*dt, s.r, WORLD.w - s.r);
+          s.y = clamp(s.y + Math.sin(a)*strength*dt, s.r, WORLD.h - s.r);
         }
       }
       const blueSummon = projectileHitsSummon(pr);
@@ -1638,7 +2120,9 @@ function updateProjectiles(dt){
         if (pr.hitCd <= 0){ pr.hitCd = 0.45; damage(target, pr.damage); }
       }
       if (pr.life <= 0){
-        addEffect({ type:'ring', x:pr.x, y:pr.y, t:0, life:0.35, r0:6, r1:60, color:'#5ab8ff', width:3 });
+        addEffect({ type:'ring', x:pr.x, y:pr.y, t:0, life:pr.charged?0.55:0.35,
+          r0:6, r1: pr.charged ? 170 : 60, color:'#5ab8ff', width: pr.charged ? 7 : 3 });
+        if (pr.charged) spawnBurst(pr.x, pr.y, '#8fd4ff', 14, 90, 340, 2, 5);
         projectiles.splice(i,1);
       }
       continue;
@@ -1686,10 +2170,38 @@ function updateProjectiles(dt){
       continue;
     }
 
+    /* ★ 赫 被吸附型苍牵引（飞向球体） */
+    if (pr.type === 'red' && pr.homingBlue){
+      const orb = pr.homingBlue;
+      if (orb.dead || projectiles.indexOf(orb) < 0){
+        pr.homingBlue = null;
+      } else {
+        const wantAng = Math.atan2(orb.y - pr.y, orb.x - pr.x);
+        const curAng = Math.atan2(pr.vy, pr.vx);
+        let diff = wantAng - curAng;
+        if (diff > Math.PI) diff -= TAU;
+        if (diff < -Math.PI) diff += TAU;
+        const spd = Math.max(Math.hypot(pr.vx, pr.vy), 780);
+        const na = curAng + clamp(diff, -9*dt, 9*dt);
+        pr.vx = Math.cos(na)*spd;
+        pr.vy = Math.sin(na)*spd;
+      }
+    }
+
     /* 其他直线飞行 */
     pr.x += pr.vx*dt;
     pr.y += pr.vy*dt;
     pr.rot = (pr.rot||0) + dt*8;
+
+    /* ★ 赫撞上吸附型苍 → 大范围「茈」爆炸 */
+    if (pr.type === 'red' && pr.homingBlue && !pr.homingBlue.dead &&
+        projectiles.indexOf(pr.homingBlue) >= 0 &&
+        dist(pr, pr.homingBlue) < pr.r + pr.homingBlue.r + 12){
+      const orb = pr.homingBlue;
+      pr.dead = true; orb.dead = true;
+      purpleBlast(pr.x, pr.y, pr.owner);
+      continue;
+    }
 
     if (Math.random() < 0.7){
       addEffect({ type:'spark', x:pr.x, y:pr.y, t:0, life:0.28,
@@ -1719,6 +2231,32 @@ function updateProjectiles(dt){
       damage(target, pr.damage);
       const a = Math.atan2(target.y - pr.y, target.x - pr.x);
 
+      /* ★ 天逆鉾：命中后 5 秒内无法使用术式与领域 */
+      if (pr.type === 'heaven'){
+        const seal = pr.seal || 5;
+        target.skillLock = Math.max(target.skillLock || 0, seal);
+        target.infinity = false;
+        target.blueFist = false;
+        addEffect({ type:'text', x:target.x, y:target.y-74, t:0, life:1.4,
+          text:'天逆鉾 · 术式封印 ' + seal + 's', color:'#ffffff', size:16 });
+        G.shake = Math.max(G.shake, 14);
+      }
+
+      /* ★ 万里锁：拽向施法者 + 眩晕（不产生击退，否则会被推开） */
+      if (pr.type === 'chain'){
+        const stun = pr.stun || 3;
+        target.stun = Math.max(target.stun || 0, stun);
+        const src = pr.owner;
+        target.pull = {
+          src, x0: target.x, y0: target.y,
+          tx: src ? src.x : target.x, ty: src ? src.y : target.y,
+          t: 0, dur: pr.pullDur || 0.55,
+        };
+        addEffect({ type:'text', x:target.x, y:target.y-74, t:0, life:1.4,
+          text:'万里锁 · 拘束 ' + stun + 's', color:'#dfe4ea', size:16 });
+        G.shake = Math.max(G.shake, 12);
+      }
+
       if (pr.type === 'red'){
         target.kbx = Math.cos(a) * 3200;
         target.kby = Math.sin(a) * 3200;
@@ -1730,7 +2268,7 @@ function updateProjectiles(dt){
             color:'#ff7a4a', size:rnd(3,6) });
         }
         G.shake = Math.max(G.shake, 16);
-      } else {
+      } else if (pr.type !== 'heaven' && pr.type !== 'chain'){
         const kb = pr.type==='purple' ? 60 : pr.type==='dismantle' ? 30 : 18;
         target.x = clamp(target.x + Math.cos(a)*kb, target.r, WORLD.w-target.r);
         target.y = clamp(target.y + Math.sin(a)*kb, target.r, WORLD.h-target.r);
@@ -1754,6 +2292,9 @@ function updateProjectiles(dt){
 /* ══════════════════════════════════════════
    式神 —— 重写为极简、安全版本
    ══════════════════════════════════════════ */
+/* 无攻击手段的召唤物（纯肉盾 / 骚扰） */
+const PASSIVE_SUMMONS = { tobi: true, flyhead: true };
+
 function updateSummons(dt){
   for (let i = summons.length - 1; i >= 0; i--){
     const s = summons[i];
@@ -1819,8 +2360,8 @@ function updateSummons(dt){
       }
     }
 
-    /* 攻击：进入接触距离后按间隔出手（脱兔无攻击手段） */
-    if (s.type !== 'tobi' && dist(s, target) <= contact + Math.max(8, s.r * 0.35)){
+    /* 攻击：进入接触距离后按间隔出手（脱兔 / 蝇头无攻击手段） */
+    if (!PASSIVE_SUMMONS[s.type] && dist(s, target) <= contact + Math.max(8, s.r * 0.35)){
       s.hitCd = (s.hitCd || 0) - dt;
       if (s.hitCd <= 0){
         s.hitCd = s.attackInterval || 0.5;
@@ -1858,7 +2399,9 @@ function removeSummon(i, s){
       }
     } else {
       addEffect({ type:'ring', x:s.x, y:s.y, t:0, life:0.4,
-        r0:4, r1:(s.r||16)*2.4, color:'#ff8a3d', width:3 });
+        r0:4, r1:(s.r||16)*2.4,
+        color: s.type === 'tobi' ? '#dfe6f2' : (s.type === 'flyhead' ? '#d8a24a' : '#ff8a3d'),
+        width:3 });
     }
   }
 
@@ -1917,9 +2460,41 @@ function updateDomains(dt){
   if (both){ checkDomainBreak(player); checkDomainBreak(enemy); }
 }
 
+/* ══════════════════════════════════════════
+   ★ 伏魔御厨子 · 自动斩击特效
+   随机角度的刀光，直接劈在角色身上
+   两面宿傩：白 / 黄色刀光    十影宿傩：紫 / 灰色刀光
+   ══════════════════════════════════════════ */
+const DOMAIN_SLASH_STEP = 0.09;      /* 每隔多久劈出一刀（仅影响刀光频率，不改领域 DPS） */
+
+function domainSlashPalette(type){
+  if (type === 'sukunaTs') return { a:'#c07bff', b:'#9aa4b2' };   /* 紫 / 灰 */
+  return { a:'#ffffff', b:'#ffd24a' };                            /* 白 / 黄 */
+}
+
+function spawnDomainSlash(type, x, y){
+  const pal = domainSlashPalette(type);
+  const n = Math.random() < 0.3 ? 2 : 1;       /* 偶尔来一记交叉斩 */
+  for (let i = 0; i < n; i++){
+    addEffect({
+      type:'sword',
+      /* ★ 刀光落在角色身上（只做极小抖动，不是散在周围） */
+      x: x + rnd(-4,4), y: y + rnd(-4,4),
+      t: 0, life: rnd(0.2, 0.28),
+      ang: rnd(0, TAU),                         /* 随机角度 */
+      len: rnd(74, 116),                        /* 刀光长度 */
+      color: pal.a, color2: pal.b,
+      width: rnd(5, 8),
+    });
+  }
+}
+
 function applyDomainEffect(owner, target, dt){
   if (!owner || !owner.domain || !target || !target.alive) return;
   const d = owner.domain;
+  /* ★ 天与咒缚：伏黑甚尔没有咒力，领域「选不中」他 */
+  const tc = CFG[target.type];
+  if (tc && tc.heavenImmuneDomain) return;
   const inThis = dist(target, d) < d.r;
   const inOwn = target.domain && dist(target, target.domain) < target.domain.r;
   if (!inThis || inOwn) return;
@@ -1951,14 +2526,14 @@ function applyDomainEffect(owner, target, dt){
       G.flash = 0.5;
     }
   } else {
-    /* 伏魔御厨子（含十影宿傩）：持续伤害，按 CFG.domainDps 决定强度 */
+    /* 伏魔御厨子（含十影宿傩）：持续伤害 + 刀剑劈砍式自动斩击 */
     const c = CFG[d.type];
     const dps = (c && finite(c.domainDps)) ? c.domainDps : 34;
     damage(target, dps * dt, true);
-    if (Math.random() < 0.4){
-      addEffect({ type:'spark', x:target.x+rnd(-40,40), y:target.y+rnd(-40,40), t:0, life:0.3,
-        vx:rnd(-80,80), vy:rnd(-80,80),
-        color: d.type === 'sukunaTs' ? '#c07bff' : '#ff4a4a', size:3 });
+    d.slashT = (d.slashT || 0) + dt;
+    while (d.slashT >= DOMAIN_SLASH_STEP){
+      d.slashT -= DOMAIN_SLASH_STEP;
+      spawnDomainSlash(d.type, target.x, target.y);
     }
   }
 }
@@ -1992,6 +2567,11 @@ function applyDomainToSummons(owner, dt){
       /* 伏魔御厨子：持续灼烧式神（魔虚罗经 damageSummon 获得对领域的适应） */
       const dps = (c && finite(c.domainDps)) ? c.domainDps : 34;
       damageSummon(s, dps * dt, 'domain', true);
+      d.slashT2 = (d.slashT2 || 0) + dt;
+      while (d.slashT2 >= DOMAIN_SLASH_STEP){
+        d.slashT2 -= DOMAIN_SLASH_STEP;
+        spawnDomainSlash(d.type, s.x, s.y);
+      }
     }
   }
 }
@@ -2020,7 +2600,7 @@ function checkDomainBreak(f){
    ══════════════════════════════════════════ */
 function render(){
   ctx.setTransform(DPR,0,0,DPR,0,0);
-  ctx.fillStyle = '#04060b';
+  ctx.fillStyle = '#121316';
   ctx.fillRect(0,0,W,H);
 
   if (G.state === 'menu' || G.state === 'select') return;
@@ -2060,12 +2640,13 @@ function render(){
   ctx.fillStyle = vg;
   ctx.fillRect(0,0,W,H);
 
+  drawDialogue(shx, shy);
   drawClashBanner();
 }
 
 function drawWorld(){
-  /* ★ 灰色场地 */
-  ctx.fillStyle = '#15171b';
+  /* ★ 深灰场地 */
+  ctx.fillStyle = '#191b1f';
   ctx.fillRect(0,0,WORLD.w,WORLD.h);
   ctx.strokeStyle = 'rgba(190,196,206,0.08)';
   ctx.lineWidth = 1;
@@ -2215,8 +2796,8 @@ function drawDomain(d){
     }
     ctx.restore();
 
-    /* 中央天平 */
-    const S = d.r * 0.26;
+    /* 中央天平（尺寸设上限，避免 720 半径下过于巨大） */
+    const S = Math.min(d.r * 0.26, 150);
     const sway = Math.sin(G.time * 1.6) * 0.10;
     ctx.save();
     ctx.translate(d.x, d.y);
@@ -2469,6 +3050,69 @@ function drawSummons(){
       }
       ctx.restore();
     }
+    else if (s.type === 'flyhead'){
+      /* ★ 蝇头：棕黄色小飞虫，无攻击 */
+      const angle = finite(s.angle) ? s.angle : 0;
+      ctx.save();
+      ctx.translate(s.x, s.y);
+
+      // 影子
+      ctx.beginPath();
+      ctx.arc(0, s.r * 0.8, s.r * 0.85, 0, TAU);
+      ctx.fillStyle = 'rgba(0,0,0,0.4)';
+      ctx.fill();
+
+      // 翅膀（半透明，高频扇动）
+      ctx.save();
+      ctx.rotate(angle);
+      const flap = 0.55 + Math.sin(G.time * 22 + s.x * 0.05) * 0.35;
+      ctx.fillStyle = 'rgba(255,240,200,0.42)';
+      for (const sy of [-1, 1]){
+        ctx.save();
+        ctx.rotate(sy * flap * 0.6);
+        ctx.beginPath();
+        ctx.moveTo(0, sy * s.r * 0.2);
+        ctx.lineTo(-s.r * 1.15, sy * s.r * 1.25);
+        ctx.lineTo(s.r * 0.25, sy * s.r * 0.95);
+        ctx.closePath();
+        ctx.fill();
+        ctx.restore();
+      }
+      ctx.restore();
+
+      // 身体
+      ctx.beginPath();
+      ctx.arc(0, 0, s.r, 0, TAU);
+      const g = ctx.createRadialGradient(-s.r*0.3, -s.r*0.3, 1, 0, 0, s.r);
+      g.addColorStop(0, '#f0d191');
+      g.addColorStop(0.55, '#c9973a');
+      g.addColorStop(1, '#7a5518');
+      ctx.fillStyle = g;
+      ctx.fill();
+      ctx.strokeStyle = s.hitFlash > 0 ? '#ff9a9a' : 'rgba(120,84,24,0.9)';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+
+      // 复眼
+      ctx.save();
+      ctx.rotate(angle);
+      ctx.fillStyle = '#3a2a08';
+      ctx.beginPath(); ctx.arc(s.r*0.4, -s.r*0.3, s.r*0.3, 0, TAU); ctx.fill();
+      ctx.beginPath(); ctx.arc(s.r*0.4,  s.r*0.3, s.r*0.3, 0, TAU); ctx.fill();
+      ctx.restore();
+
+      drawSummonBar(s, s.r + 13, '#d8a24a');
+
+      const ratio = clamp(s.life / s.maxLife, 0, 1);
+      if (ratio > 0 && ratio <= 1){
+        ctx.beginPath();
+        ctx.arc(0, 0, s.r + 4, -Math.PI/2, -Math.PI/2 + TAU * ratio);
+        ctx.strokeStyle = 'rgba(216,162,74,0.65)';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
     else if (s.type === 'mahoraga'){
       /* ★ 白色球体 + 金色法轮 */
       const R = s.r;
@@ -2584,11 +3228,42 @@ function drawSummonBar(s, topOffset, color){
 
 function drawProjectiles(){
   for (const pr of projectiles){
+    if (!pr || pr.dead) continue;
     ctx.save();
     ctx.translate(pr.x, pr.y);
 
+    /* ★ 赫 被吸附型苍牵引：绘制红色牵引光丝 */
+    if (pr.type === 'red' && pr.homingBlue && !pr.homingBlue.dead){
+      const o = pr.homingBlue;
+      ctx.beginPath();
+      ctx.moveTo(o.x - pr.x, o.y - pr.y);
+      ctx.lineTo(0, 0);
+      ctx.strokeStyle = 'rgba(255,170,120,0.5)';
+      ctx.lineWidth = 2.5;
+      ctx.setLineDash([9, 7]);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
     if (pr.type === 'blue'){
-      if (pr.owner && pr.owner.alive){
+      const gc = CFG.gojo;
+      if (pr.charged){
+        /* ★ 吸附型苍：以球心为引力中心，带旋转气流环 */
+        const R = gc.blueChargedR;
+        const g0 = ctx.createRadialGradient(0,0, 4, 0,0, R);
+        g0.addColorStop(0,   'rgba(120,205,255,0.20)');
+        g0.addColorStop(0.45,'rgba(70,150,255,0.09)');
+        g0.addColorStop(1,   'rgba(40,110,255,0)');
+        ctx.beginPath(); ctx.arc(0,0,R,0,TAU); ctx.fillStyle = g0; ctx.fill();
+        const spin = (pr.age||0) * 3.4;
+        for (let k2=0;k2<3;k2++){
+          ctx.beginPath();
+          ctx.arc(0,0, pr.r + 16 + k2*26, spin + k2*2.1, spin + k2*2.1 + 1.5);
+          ctx.strokeStyle = hexA('#8fd4ff', 0.5 - k2*0.12);
+          ctx.lineWidth = Math.max(1, 3 - k2*0.7);
+          ctx.stroke();
+        }
+      } else if (pr.owner && pr.owner.alive){
         const R = 400;
         const ox = pr.owner.x - pr.x, oy = pr.owner.y - pr.y;
         const g0 = ctx.createRadialGradient(ox, oy, 4, ox, oy, R);
@@ -2599,7 +3274,7 @@ function drawProjectiles(){
         ctx.fillStyle = g0; ctx.fill();
       }
       const g = ctx.createRadialGradient(0,0,1, 0,0,pr.r);
-      g.addColorStop(0,'#ffffff');
+      g.addColorStop(0, pr.charged ? '#ffffff' : '#ffffff');
       g.addColorStop(0.35,'#7fcaff');
       g.addColorStop(1,'rgba(25,80,200,0)');
       ctx.beginPath(); ctx.arc(0,0,pr.r,0,TAU);
@@ -2719,6 +3394,51 @@ function drawProjectiles(){
       }
       ctx.restore();
     }
+    else if (pr.type === 'heaven'){
+      /* ★ 天逆鉾：白色弧形闪光（朝向由 rot 决定，宽弧在前方展开） */
+      ctx.rotate(pr.rot || 0);
+      ctx.lineCap = 'round';
+      const arc = (rad, w, col) => {
+        ctx.strokeStyle = col; ctx.lineWidth = w;
+        ctx.beginPath(); ctx.arc(0, 0, rad, -1.18, 1.18); ctx.stroke();
+      };
+      arc(pr.r*1.30, 14, 'rgba(176,190,206,0.32)');
+      arc(pr.r*1.00, 8,  'rgba(255,255,255,0.92)');
+      arc(pr.r*0.70, 3,  'rgba(255,255,255,1)');
+      /* 拖尾 */
+      const tg = ctx.createLinearGradient(-pr.r*4.5, 0, 0, 0);
+      tg.addColorStop(0, 'rgba(255,255,255,0)');
+      tg.addColorStop(1, 'rgba(240,246,252,0.6)');
+      ctx.strokeStyle = tg; ctx.lineWidth = 6;
+      ctx.beginPath(); ctx.moveTo(-pr.r*4.5, 0); ctx.lineTo(-pr.r*0.2, 0); ctx.stroke();
+      ctx.lineCap = 'butt';
+    }
+    else if (pr.type === 'chain'){
+      /* ★ 万里锁：从施法者一路拖出的锁链 */
+      const ow = pr.owner;
+      if (ow && finite(ow.x) && finite(ow.y)){
+        const ca = Math.atan2(pr.y - ow.y, pr.x - ow.x);
+        const clen = Math.hypot(pr.x - ow.x, pr.y - ow.y);
+        const cn = Math.max(2, Math.round(clen / 15));
+        ctx.save();
+        ctx.rotate(ca);
+        ctx.strokeStyle = 'rgba(198,208,220,0.9)';
+        ctx.lineWidth = 2.4;
+        for (let i = 1; i <= cn; i++){
+          const dd = -i * (clen / cn);
+          ctx.beginPath(); ctx.arc(dd, 0, 3.6, 0, TAU); ctx.stroke();
+        }
+        ctx.restore();
+      }
+      /* 钩爪 */
+      ctx.rotate(pr.rot || 0);
+      ctx.strokeStyle = 'rgba(232,240,248,0.95)';
+      ctx.lineWidth = 3;
+      ctx.lineCap = 'round';
+      ctx.beginPath(); ctx.moveTo(-11, -10); ctx.lineTo(6, 0); ctx.lineTo(-11, 10); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(-4, 0); ctx.lineTo(15, 0); ctx.stroke();
+      ctx.lineCap = 'butt';
+    }
     ctx.restore();
   }
 }
@@ -2728,9 +3448,11 @@ function drawProjectiles(){
    ══════════════════════════════════════════ */
 function drawFighter(f){
   drawStatusAuras(f);
+  drawPullChain(f);
   if (f.type === 'gojo') drawGojo(f);
   else if (f.type === 'sukunaTs') drawSukunaTs(f);
   else if (f.type === 'higuruma') drawHiguruma(f);
+  else if (f.type === 'toji') drawToji(f);
   else drawSukuna(f);
 }
 
@@ -2986,6 +3708,66 @@ function drawHiguruma(h){
   ctx.restore();
 }
 
+/* ★ 伏黑甚尔：黑色作战服 + 银白天逆鉾 */
+function drawToji(t){
+  ctx.save();
+  ctx.translate(t.x, t.y);
+
+  ctx.beginPath(); ctx.arc(0,0,t.r,0,TAU);
+  const bg = ctx.createRadialGradient(-t.r*0.35,-t.r*0.35,1, 0,0,t.r);
+  bg.addColorStop(0,'#4c525a'); bg.addColorStop(0.55,'#23272d'); bg.addColorStop(1,'#0b0d10');
+  ctx.fillStyle = bg; ctx.fill();
+  ctx.strokeStyle = t.hitFlash > 0 ? '#ff4a4a' : '#dfe4ea';
+  ctx.lineWidth = 2.5; ctx.stroke();
+
+  /* 朝向：手持的银白刃（天逆鉾） */
+  ctx.save();
+  ctx.rotate(t.facing);
+  ctx.strokeStyle = '#98a1ac';
+  ctx.lineWidth = 5; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(t.r*0.1, 0); ctx.lineTo(t.r*0.9, 0); ctx.stroke();
+  const bl = ctx.createLinearGradient(t.r*0.8, 0, t.r*1.6, 0);
+  bl.addColorStop(0,'rgba(255,255,255,0.95)');
+  bl.addColorStop(1,'rgba(200,212,226,0.12)');
+  ctx.strokeStyle = bl; ctx.lineWidth = 7;
+  ctx.beginPath(); ctx.moveTo(t.r*0.8, 0); ctx.lineTo(t.r*1.6, 0); ctx.stroke();
+  ctx.lineCap = 'butt';
+  ctx.restore();
+
+  ctx.restore();
+
+  /* 名牌 */
+  ctx.save();
+  ctx.font = '700 13px system-ui,sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillStyle = 'rgba(223,228,234,0.92)';
+  ctx.fillText('伏黑甚尔', t.x, t.y - t.r - 16);
+  if (t.stun > 0){
+    ctx.fillStyle = 'rgba(255,180,180,0.95)';
+    ctx.font = '700 12px system-ui,sans-serif';
+    ctx.fillText('眩晕 ' + t.stun.toFixed(1) + 's', t.x, t.y + t.r + 22);
+  }
+  ctx.restore();
+}
+
+/* ★ 万里锁拖拽期间，在施法者与目标之间画出一条锁链 */
+function drawPullChain(f){
+  const p = f && f.pull;
+  if (!p || !p.src || !p.src.alive) return;
+  const s = p.src;
+  const a = Math.atan2(f.y - s.y, f.x - s.x);
+  const len = Math.hypot(f.x - s.x, f.y - s.y);
+  const n = Math.max(2, Math.round(len / 16));
+  ctx.save();
+  ctx.strokeStyle = 'rgba(206,216,228,0.85)';
+  ctx.lineWidth = 2.2;
+  for (let i = 1; i <= n; i++){
+    const d = i * (len / n);
+    ctx.beginPath(); ctx.arc(s.x + Math.cos(a)*d, s.y + Math.sin(a)*d, 3.2, 0, TAU); ctx.stroke();
+  }
+  ctx.restore();
+}
+
 function drawSukunaLabel(s, name, nameColor){
   ctx.save();
   ctx.font = '700 13px system-ui,sans-serif';
@@ -3103,6 +3885,89 @@ function drawEffects(){
       ctx.beginPath(); ctx.arc(0,0, 16 + k*40, 0, TAU); ctx.stroke();
       ctx.restore();
     }
+    else if (e.type === 'sword'){
+      /* ★ 伏魔御厨子的自动斩击：随机角度的刀光，横穿角色身体 */
+      ctx.save();
+      ctx.translate(e.x, e.y);
+      ctx.rotate(e.ang);
+      ctx.globalCompositeOperation = 'lighter';
+      const L = (e.len || 90) * (0.70 + k*0.45);        /* 刀光向两侧延展 */
+      const w = (e.width || 6) * (1 - k*0.5);
+      const blade = e.color || '#ffffff';               /* 主色：白 / 紫 */
+      const edge  = e.color2 || e.color || '#ffffff';   /* 副色：黄 / 灰 */
+
+      /* 刀身（中间厚、两端收尖的光带） */
+      const lg = ctx.createLinearGradient(-L, 0, L, 0);
+      lg.addColorStop(0,    hexA(blade, 0));
+      lg.addColorStop(0.20, hexA(edge,  a*0.5));
+      lg.addColorStop(0.5,  hexA(blade, a*0.95));
+      lg.addColorStop(0.80, hexA(edge,  a*0.5));
+      lg.addColorStop(1,    hexA(blade, 0));
+      ctx.beginPath();
+      ctx.moveTo(-L, 0);
+      ctx.quadraticCurveTo(0, -w*1.7, L, 0);
+      ctx.quadraticCurveTo(0,  w*1.7, -L, 0);
+      ctx.closePath();
+      ctx.fillStyle = lg;
+      ctx.fill();
+
+      /* 刃口高光（一条细白线） */
+      ctx.beginPath();
+      ctx.moveTo(-L*0.95, 0);
+      ctx.quadraticCurveTo(0, -w*0.6, L*0.95, 0);
+      ctx.strokeStyle = hexA('#ffffff', a*0.9);
+      ctx.lineWidth = Math.max(1, w*0.4);
+      ctx.lineCap = 'round';
+      ctx.stroke();
+      ctx.lineCap = 'butt';
+
+      /* 落刀闪光点（命中角色处） */
+      const bs = 22 * (1 - k*0.35);
+      const bg = ctx.createRadialGradient(0,0,1, 0,0, bs);
+      bg.addColorStop(0,   hexA(blade, a*0.9));
+      bg.addColorStop(0.45,hexA(edge,  a*0.4));
+      bg.addColorStop(1,   hexA(blade, 0));
+      ctx.beginPath(); ctx.arc(0, 0, bs, 0, TAU);
+      ctx.fillStyle = bg; ctx.fill();
+      ctx.restore();
+    }
+    else if (e.type === 'bigpurple'){
+      /* ★ 大范围「茈」：紫色冲击波 */
+      const R = (e.r0||20) + ((e.r1||480)-(e.r0||20)) * Math.pow(k, 0.6);
+      const g = ctx.createRadialGradient(e.x, e.y, R*0.15, e.x, e.y, R*1.05);
+      g.addColorStop(0,    `rgba(246,228,255,${a*0.85})`);
+      g.addColorStop(0.35, `rgba(180,110,255,${a*0.55})`);
+      g.addColorStop(0.7,  `rgba(110,40,220,${a*0.28})`);
+      g.addColorStop(1,    'rgba(60,0,120,0)');
+      ctx.beginPath(); ctx.arc(e.x, e.y, R*1.05, 0, TAU);
+      ctx.fillStyle = g; ctx.fill();
+      /* 外层冲击波环 */
+      ctx.beginPath(); ctx.arc(e.x, e.y, R, 0, TAU);
+      ctx.strokeStyle = `rgba(232,205,255,${a*0.95})`;
+      ctx.lineWidth = 16*(1-k) + 3;
+      ctx.stroke();
+      /* 内层白环 */
+      ctx.beginPath(); ctx.arc(e.x, e.y, R*0.7, 0, TAU);
+      ctx.strokeStyle = `rgba(255,255,255,${a*0.7})`;
+      ctx.lineWidth = 5*(1-k) + 1;
+      ctx.stroke();
+      /* 放射裂纹 */
+      ctx.strokeStyle = `rgba(214,168,255,${a*0.6})`;
+      ctx.lineWidth = 3*(1-k) + 1;
+      for (let i=0;i<12;i++){
+        const sa = i*(TAU/12) + k*0.6;
+        ctx.beginPath();
+        ctx.moveTo(e.x + Math.cos(sa)*R*0.32, e.y + Math.sin(sa)*R*0.32);
+        ctx.lineTo(e.x + Math.cos(sa)*R*0.96, e.y + Math.sin(sa)*R*0.96);
+        ctx.stroke();
+      }
+      ctx.save();
+      ctx.globalAlpha = a*0.25;
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.beginPath(); ctx.arc(e.x, e.y, R*0.55, 0, TAU);
+      ctx.fillStyle = '#7b2fff'; ctx.fill();
+      ctx.restore();
+    }
     else if (e.type === 'text'){
       ctx.save();
       ctx.font = `900 ${e.size||16}px system-ui,sans-serif`;
@@ -3121,6 +3986,129 @@ function hexA(hex, a){
   if (isNaN(n)) return 'rgba(255,255,255,' + clamp(a,0,1) + ')';
   const r = (n>>16)&255, g = (n>>8)&255, b = n&255;
   return `rgba(${r},${g},${b},${clamp(a,0,1)})`;
+}
+
+/* ══════════════════════════════════════════
+   开场对白绘制（屏幕空间，气泡跟随角色头顶）
+   ══════════════════════════════════════════ */
+function roundRectPath(x, y, w, h, r){
+  const rr = Math.min(r, w/2, h/2);
+  ctx.beginPath();
+  ctx.moveTo(x+rr, y);
+  ctx.lineTo(x+w-rr, y);   ctx.arcTo(x+w, y,   x+w, y+rr, rr);
+  ctx.lineTo(x+w,   y+h-rr); ctx.arcTo(x+w, y+h, x+w-rr, y+h, rr);
+  ctx.lineTo(x+rr,  y+h);  ctx.arcTo(x,   y+h, x,   y+h-rr, rr);
+  ctx.lineTo(x,     y+rr); ctx.arcTo(x,   y,   x+rr, y,     rr);
+  ctx.closePath();
+}
+
+/* 按最大宽度逐字折行（以字符为单位，中文安全） */
+function wrapDialogue(text, maxW){
+  const out = [];
+  let line = '';
+  for (const ch of Array.from(text)){
+    const next = line + ch;
+    if (line && ctx.measureText(next).width > maxW){ out.push(line); line = ch; }
+    else line = next;
+  }
+  out.push(line);
+  return out;
+}
+
+function drawDialogue(shx, shy){
+  if (!introTalk || !player || !enemy) return;
+  const cur = introTalk.seq[introTalk.idx];
+  if (!cur) return;
+  const f = cur.side === 'player' ? player : enemy;
+  if (!f || !finite(f.x) || !finite(f.y)) return;
+
+  const sx = (f.x - cam.x) * scale + shx;
+  const sy = (f.y - cam.y) * scale + shy;
+  const headY = sy - f.r * scale;          /* 角色头顶的屏幕 y */
+
+  const n = Math.max(0, Math.floor(introTalk.chars));
+  const typing = n < cur.text.length;
+
+  const nameFont = '700 11px system-ui,"PingFang SC","Microsoft YaHei",sans-serif';
+  const bodyFont = '700 15px system-ui,"PingFang SC","Microsoft YaHei",sans-serif';
+  const padX = 14, padY = 10, lineH = 22, nameH = 17, tail = 9, maxW = Math.min(W*0.66, 360);
+
+  ctx.save();
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'alphabetic';
+
+  ctx.font = bodyFont;
+  const lines = wrapDialogue(cur.text, maxW);   /* 按完整台词折行：打字全程排版不跳动 */
+  let textW = 0;
+  for (const l of lines) textW = Math.max(textW, ctx.measureText(l).width);
+  ctx.font = nameFont;
+  const nameW = ctx.measureText(f.name).width;
+
+  const bw = Math.max(textW, nameW + 34) + padX*2;
+  const bh = nameH + lines.length * lineH + padY*2;
+  const bx = clamp(sx - bw/2, 8, Math.max(8, W - bw - 8));
+  const by = Math.max(8, headY - 16 - tail - bh);   /* 气泡底 + 尖角 = 头顶上方 16px */
+
+  /* 气泡底 */
+  const g = ctx.createLinearGradient(bx, by, bx, by+bh);
+  g.addColorStop(0, 'rgba(30,33,37,0.94)');
+  g.addColorStop(1, 'rgba(17,18,21,0.94)');
+  ctx.fillStyle = g;
+  roundRectPath(bx, by, bw, bh, 12);
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(214,222,232,0.62)';
+  ctx.lineWidth = 1.6;
+  ctx.stroke();
+
+  /* 指向头顶的尖角 */
+  ctx.beginPath();
+  ctx.moveTo(sx - 8, by + bh - 0.8);
+  ctx.lineTo(sx + 8, by + bh - 0.8);
+  ctx.lineTo(sx, by + bh + tail);
+  ctx.closePath();
+  ctx.fillStyle = 'rgba(17,18,21,0.94)';
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(214,222,232,0.62)';
+  ctx.stroke();
+
+  /* 角色名（沿用角色主题色） */
+  ctx.font = nameFont;
+  ctx.fillStyle = nameColor(f.type);
+  ctx.fillText(f.name, bx + padX, by + padY + 11);
+  ctx.strokeStyle = 'rgba(214,222,232,0.16)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(bx + padX, by + padY + nameH - 2);
+  ctx.lineTo(bx + bw - padX, by + padY + nameH - 2);
+  ctx.stroke();
+
+  /* 台词：逐字输出 */
+  ctx.font = bodyFont;
+  ctx.fillStyle = '#eef2f6';
+  const textTop = by + padY + nameH + lineH*0.72;
+  let remain = n, curLine = 0, curW = 0;
+  for (let i = 0; i < lines.length && remain > 0; i++){
+    const seg = lines[i].slice(0, remain);
+    remain -= lines[i].length;
+    if (seg){
+      ctx.fillText(seg, bx + padX, textTop + i*lineH);
+      curLine = i;
+      curW = ctx.measureText(seg).width;
+    }
+  }
+
+  /* 打字光标 */
+  if (typing && Math.floor(G.time * 3) % 2 === 0){
+    ctx.fillStyle = 'rgba(226,233,240,0.9)';
+    ctx.fillRect(bx + padX + curW + 1, textTop + curLine*lineH - 12, 8, 14);
+  }
+
+  /* 跳过提示 */
+  ctx.textAlign = 'center';
+  ctx.font = '500 11px system-ui,"PingFang SC",sans-serif';
+  ctx.fillStyle = 'rgba(186,194,204,0.5)';
+  ctx.fillText('点击 / 任意键 继续', W/2, H - 62);
+  ctx.restore();
 }
 
 function drawClashBanner(){
@@ -3191,11 +4179,56 @@ function updateHUD(){
   if (el.scet) el.scet.textContent = `${Math.floor(enemy.ce)} / ${eMax}`;
 }
 
+/* ★ 技能动作 → 冷却字段 / 冷却总时长字段 */
+const CD_FIELD = {
+  blue:['blue','blueCd'], red:['red','redCd'], purple:['purple','purpleCd'],
+  reverse:['reverse','reverseCd'], domain:['domain','domainCd'],
+  fire:['fire','fireCd'], dismantle:['dismantle','dismantleCd'],
+  nue:['nue','nueCd'], dog:['dog','dogCd'], tobi:['tobi','tobiCd'],
+  mahoraga:['maho','mahoCd'], space:['space','spaceCd'],
+  shinuchi:['shinuchi','shinuchiCd'], sentence:['sentence','sentenceCd'],
+  heaven:['heaven','heavenCd'], chain:['chain','chainCd'], fly:['fly','flyCd'],
+};
+
+/* ★ 按键 CD 动画：扇形遮罩按剩余比例回填 + 居中倒计时数字
+   （带缓存，避免每帧重复写样式造成重绘） */
+function paintCooldown(act, f, type){
+  const b = btns[act];
+  if (!b) return;
+  const m = CD_FIELD[act];
+  if (!m) return;
+  const cfg = CFG[type] || {};
+  const total = cfg[m[1]];
+  const left = (f.cd && f.cd[m[0]]) || 0;
+
+  if (!finite(total) || total <= 0 || left <= 0){
+    if (b._cdp !== 0){
+      b._cdp = 0;
+      b.style.setProperty('--p', 0);
+      b.classList.remove('cdring');
+      if (b._cdtxt) b._cdtxt.textContent = '';
+    }
+    return;
+  }
+  /* 量化到 2% 一档，避免每帧都触发重绘 */
+  const p = Math.ceil(clamp(left / total, 0, 1) * 50) / 50;
+  if (b._cdp !== p){
+    b._cdp = p;
+    b.style.setProperty('--p', p);
+    b.classList.add('cdring');
+  }
+  const txt = left >= 1 ? String(Math.ceil(left)) : left.toFixed(1);
+  if (b._cdtxt && b._cdtxt.textContent !== txt) b._cdtxt.textContent = txt;
+}
+
 function updateButtons(){
   if (!player || !btns) return;
   const p = player;
   if (btns.infinity) btns.infinity.classList.toggle('on', p.infinity);
   if (btns.bluefist) btns.bluefist.classList.toggle('on', p.blueFist);
+
+  /* ★ 先刷新所有按键的 CD 扇形动画 */
+  for (const s of (SKILL_SETS[p.type] || [])) paintCooldown(s.act, p, p.type);
 
   const setCool = (act, cool, extra) => {
     const b = btns[act];
@@ -3237,6 +4270,19 @@ function updateButtons(){
       btns.shinuchi.classList.toggle('ready', !sealed && p.cd.shinuchi <= 0 && p.ce >= c.shinuchiCost);
     if (btns.sentence)
       btns.sentence.classList.toggle('ready', !sealed && p.cd.sentence <= 0 && p.ce >= c.sentenceCost);
+  } else if (p.type === 'toji'){
+    const c = CFG.toji;
+    /* ★ 天逆鉾封印期间，全部咒具技能一并置灰 */
+    const sealed = p.skillLock > 0;
+    setCool('heaven', sealed || p.cd.heaven > 0, p.ce < c.heavenCost);
+    setCool('chain',  sealed || p.cd.chain > 0,  p.ce < c.chainCost);
+    setCool('fly',    sealed || p.cd.fly > 0,    p.ce < c.flyCost);
+    if (btns.heaven)
+      btns.heaven.classList.toggle('ready', !sealed && p.cd.heaven <= 0 && p.ce >= c.heavenCost);
+    if (btns.chain)
+      btns.chain.classList.toggle('ready', !sealed && p.cd.chain <= 0 && p.ce >= c.chainCost);
+    if (btns.fly)
+      btns.fly.classList.toggle('ready', !sealed && p.cd.fly <= 0 && p.ce >= c.flyCost);
   } else {
     const c = CFG.sukunaTs;
     setCool('nue', p.cd.nue > 0, p.ce < c.nueCost);
