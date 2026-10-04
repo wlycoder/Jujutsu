@@ -49,16 +49,21 @@
       <span class="btn-text">联机对战</span>
       <span class="btn-desc">敬请期待</span>
     </button>
+    <button class="menu-btn demo" data-mode="demo">
+      <span class="btn-icon">🎬</span>
+      <span class="btn-text">演示模式</span>
+      <span class="btn-desc">双方角色可选 · 自动对战</span>
+    </button>
   </div>
   <div id="menuToast" class="toast"></div>
 </div>
 
 <div id="selectScreen" class="screen hidden">
-  <div class="select-title">选 择 角 色</div>
-  <div class="select-hint">双方角色可自由指定 · 点击卡片查看详细术式</div>
+  <div id="selectTitle" class="select-title">选 择 角 色</div>
+  <div id="selectHint" class="select-hint">双方角色可自由指定 · 点击卡片查看详细术式</div>
   <div class="select-body">
     <div class="select-col">
-      <div class="select-label"><b class="step">1</b>你的角色</div>
+      <div class="select-label"><b class="step">1</b><span id="sideLabelPlayer">你的角色</span></div>
       <div class="char-choice" data-side="player">
         <div class="char-card" data-char="gojo">
           <div class="char-avatar gojo-avatar">五</div>
@@ -94,7 +99,7 @@
     </div>
     <div class="select-vs">VS</div>
     <div class="select-col">
-      <div class="select-label"><b class="step">2</b>人机角色</div>
+      <div class="select-label"><b class="step">2</b><span id="sideLabelAi">人机角色</span></div>
       <div class="char-choice" data-side="ai">
         <div class="char-card" data-char="gojo">
           <div class="char-avatar gojo-avatar">五</div>
@@ -131,6 +136,11 @@
   </div>
   <div id="charInfo" class="char-info hidden"></div>
   <div class="select-actions">
+    <div id="aiLevel" class="ai-level">
+      <span id="aiLevelLabel" class="al-label">人机难度</span>
+      <button class="al-btn on" data-lv="normal">普通</button>
+      <button class="al-btn" data-lv="pro">熟练</button>
+    </div>
     <button id="backBtn" class="menu-btn small">返 回</button>
     <button id="startBtn" class="menu-btn primary small" disabled>开 始 战 斗</button>
   </div>

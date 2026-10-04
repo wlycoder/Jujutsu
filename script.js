@@ -15,10 +15,158 @@ const FORCE_DESKTOP = /[?&]desktop/i.test(location.search);
 const IS_MOBILE = !FORCE_DESKTOP && (FORCE_MOBILE || (IS_TOUCH &&
   (/Android|iPhone|iPad|iPod|Windows Phone|Mobile/i.test(navigator.userAgent) ||
    Math.min(window.innerWidth, window.innerHeight) < 560)));
+/* ★ 移动端自动攻击的射程（远程角色） */
+const AUTO_ATK_RANGE = 520;
+
+/* ══════════════════════════════════════════
+   ★ 人机难度：普通（原有 AI）/ 熟练（更强）
+   speed   移动速度倍率
+   dodgeR  闪避探测半径   dodgeCone 闪避判定角
+   reserve 释放术式时保留的咒力余量（越小越敢放）
+   healAt  反转术式的血量阈值倍率（越大越早治疗）
+   domHp / domD  领域展开的血量/距离阈值（越大越早开）
+   ══════════════════════════════════════════ */
+let AI_LEVEL = 'normal';
+const AI_TUNE = {
+  normal: { speed: 1.00, dodgeR: 380, dodgeCone: 0.30, reserve: 14, healAt: 1.00, domHp: 0.55, domD: 285, prob: 1.00 },
+  pro:    { speed: 1.09, dodgeR: 470, dodgeCone: 0.42, reserve: 4,  healAt: 1.25, domHp: 0.72, domD: 370, prob: 1.35 },
+};
+function aiTune(f){ return (f && f.aiPro) ? AI_TUNE.pro : AI_TUNE.normal; }
+/* ★ 熟练人机会更频繁地释放术式（概率上限 98%，保留少量走位节奏） */
+function aiChance(f, p){ return Math.random() < Math.min(0.98, p * aiTune(f).prob); }
 
 let W = 0, H = 0, DPR = 1, scale = 1, baseScale = 1;
 let rotated = false;             /* ★ 手机竖屏 → 舞台旋转 90° 按横屏绘制 */
 const WORLD = { w: 1700, h: 1150 };
+/* ══════════════════════════════════════════
+   ★ 音效系统
+   —— 文件路径：assets/audio/<角色>/<技能>.ogg
+   —— 同一技能可配多个文件 → 每次随机播一个（如领域 domain1 / domain2）
+   —— 用 HTMLAudioElement（file:// 下 fetch/WebAudio 会被拦，Audio 不受影响）
+   ══════════════════════════════════════════ */
+const AUDIO_BASE = 'assets/audio/';
+/* 全角色通用 */
+const SFX_UNIVERSAL = {
+  reverse:     ['universal/reverse.ogg'],                    /* 反转术式 */
+  domainSpawn: ['universal/domainSpawn.ogg'],                /* 领域生成中 */
+  domainBreak: ['universal/domainBreak.ogg'],                /* 领域破碎 */
+};
+/* 角色专属 */
+const SFX_CHAR = {
+  gojo: {
+    blue:        ['gojo/blue.ogg'],                            /* 苍 */
+    red:         ['gojo/red.ogg'],                             /* 赫 */
+    purple:      ['gojo/purpleShoot.ogg'],                     /* 茈 · 发射 */
+    purpleBlast: ['gojo/purpleExplode.ogg'],                   /* 茈 · 爆炸（赫撞吸附苍） */
+    domain:      ['gojo/domain1.ogg', 'gojo/domain2.ogg'],     /* 领域展开：随机一个 */
+    brainbreak:  ['gojo/brainBreak.ogg'],                      /* 破脑 */
+  },
+  sukuna: {
+    domain:    ['sukuna/domain.ogg'],                          /* 伏魔御厨子 · 展开 */
+    fire:      ['sukuna/fire.ogg'],                            /* 开 */
+    dismantle: ['sukuna/slashAtk.ogg'],                        /* 解 */
+    slash:     ['sukuna/slash1.ogg', 'sukuna/slash2.ogg', 'sukuna/slash3.ogg'],  /* 领域自动斩击：随机一个 */
+  },
+};
+
+const SFX_VOL = 0.55;         /* 主音量 */
+const SFX_POOL = 3;           /* 每个音效的并发副本数（短时间内可叠放） */
+const SFX_MIN_GAP = 70;       /* 同一音效的最小重播间隔（ms） */
+const SLASH_SFX_GAP = 80;    /* ★ 领域自动斩击音效的最小间隔（视觉 11 刀/秒，音频不能照搬） */
+let slashSfxAt = 0;
+const sfxPool = {};           /* file → { list:[Audio], idx } */
+const sfxLast = {};           /* file → 上次播放时间 */
+let sfxMuted = false;
+let sfxUnlocked = false;
+
+function sfxFiles(act, type){
+  const own = SFX_CHAR[type];
+  if (own && own[act]) return own[act];
+  return SFX_UNIVERSAL[act] || null;
+}
+
+function sfxGet(file){
+  let p = sfxPool[file];
+  if (p) return p;
+  p = sfxPool[file] = { list: [], idx: 0 };
+  try {
+    for (let i = 0; i < SFX_POOL; i++){
+      const a = new Audio(AUDIO_BASE + file);
+      a.preload = 'auto';
+      a.volume = SFX_VOL;
+      p.list.push(a);
+    }
+  } catch(_){}
+  return p;
+}
+
+/* 预加载全部音效 */
+function preloadSfx(){
+  const all = [];
+  for (const t in SFX_CHAR) for (const k in SFX_CHAR[t]) all.push(...SFX_CHAR[t][k]);
+  for (const k in SFX_UNIVERSAL) all.push(...SFX_UNIVERSAL[k]);
+  for (const f of all) sfxGet(f);
+}
+
+/* 播放：按 (技能动作, 角色) 取音效；无对应文件则静默 */
+function playSfx(act, type, vol){
+  try {
+    if (sfxMuted) return;
+    const files = sfxFiles(act, type);
+    if (!files || !files.length) return;
+    const file = files.length === 1 ? files[0] : files[Math.floor(Math.random() * files.length)];
+    const now = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+    if (sfxLast[file] && now - sfxLast[file] < SFX_MIN_GAP) return;
+    sfxLast[file] = now;
+
+    const p = sfxGet(file);
+    if (!p.list.length) return;
+    p.idx = (p.idx + 1) % p.list.length;
+    const a = p.list[p.idx];
+    a.volume = clamp(SFX_VOL * (vol === undefined ? 1 : vol), 0, 1);
+    try { a.currentTime = 0; } catch(_){}
+    const pr = a.play();
+    if (pr && pr.catch) pr.catch(() => {});
+  } catch(_){}
+}
+
+/* ★ 首次交互时解锁播放权限（移动端必须由用户手势触发）
+   每个音效只预热第一个副本，避免页面加载时产生大量被中断的请求 */
+function unlockSfx(){
+  if (sfxUnlocked) return;
+  sfxUnlocked = true;
+  for (const f in sfxPool){
+    const a = sfxPool[f].list[0];
+    if (!a) continue;
+    try {
+      a.muted = true;
+      const pr = a.play();
+      if (pr && pr.then) pr.then(() => { a.pause(); a.muted = false; try { a.currentTime = 0; } catch(_){} })
+                          .catch(() => { a.muted = false; });
+      else a.muted = false;
+    } catch(_){}
+  }
+}
+
+function updateMuteBtn(){
+  const b = document.getElementById('muteBtn');
+  if (!b) return;
+  b.textContent = sfxMuted ? '🔇' : '🔊';
+  b.classList.toggle('off', sfxMuted);
+}
+
+function toggleMute(){
+  sfxMuted = !sfxMuted;
+  if (sfxMuted){
+    for (const f in sfxPool)
+      for (const a of sfxPool[f].list){ try { a.pause(); } catch(_){} }
+  }
+  updateMuteBtn();
+  if (player && player.alive)
+    addEffect({ type:'text', x:player.x, y:player.y-96, t:0, life:1.0,
+      text: sfxMuted ? '音效 · 关' : '音效 · 开', color:'#9fd8ff', size:15 });
+}
+
 const clamp = (v,a,b) => v < a ? a : (v > b ? b : v);
 const rnd = (a,b) => a + Math.random()*(b-a);
 const dist = (a,b) => Math.hypot(a.x-b.x, a.y-b.y);
@@ -104,8 +252,8 @@ const CFG = {
     domainMaxR: 365, domainDuration: 5.2, domainDps: 0,
     brainBreakCost: 0.18, brainBreakStun: 0.45,
     brainBleed: 0.06, brainBreakMinHp: 0.28,
-    /* ★ 简易领域（五条悟名）：身下生成跟随移动的绿色圆环，6 秒内免疫敌方领域 */
-    sdCost: 25, sdCd: 18, sdDuration: 6, sdR: 118,
+    /* ★ 简易领域（五条悟名）：身下生成跟随移动的绿色圆环，4 秒内免疫敌方领域 */
+    sdCost: 25, sdCd: 18, sdDuration: 4, sdR: 118,
   },
   sukuna: {
     name: '两面宿傩',
@@ -120,8 +268,8 @@ const CFG = {
     domainName: '伏魔御厨子',
     domainBaseR: 390, domainOpenTime: 0.5, domainGrowRate: 78,
     domainMaxR: 1600, domainDuration: 8.5, domainDps: 34,
-    /* ★ 弥虚葛笼：身下生成跟随移动的绿色圆环，6 秒内免疫敌方领域 */
-    sdCost: 25, sdCd: 18, sdDuration: 6, sdR: 120,
+    /* ★ 弥虚葛笼：身下生成跟随移动的绿色圆环，4 秒内免疫敌方领域 */
+    sdCost: 25, sdCd: 18, sdDuration: 4, sdR: 120,
   },
   /* ★ 十影宿傩 —— 伏魔御厨子（削弱版） */
   sukunaTs: {
@@ -138,6 +286,9 @@ const CFG = {
     /* ★ 魔虚罗：有血量、会砍击、会适应（无时间限制，每次场上限1只） */
     mahoCost: 55, mahoCd: 17, mahoDmg: 90, mahoHp: 520,
     mahoAdaptStep: 0.12, mahoAdaptMax: 0.85,
+    /* ★ 嵌合兽：与魔虚罗同体积（r=40）的橙色兽，攻击逻辑类似玉犬（贴身撕咬，有时限） */
+    chimeraCost: 45, chimeraCd: 14, chimeraHp: 340, chimeraDmg: 48,
+    chimeraDur: 12, chimeraSpeed: 300, chimeraAtkInterval: 0.6,
     /* ★ 空间斩：需召唤过魔虚罗且其陨落后解锁 */
     spaceCost: 45, spaceCd: 14, spaceDmg: 320,
     domainCost: 60, domainCd: 36,
@@ -145,8 +296,8 @@ const CFG = {
     domainName: '伏魔御厨子',
     domainBaseR: 320, domainOpenTime: 0.55, domainGrowRate: 40,
     domainMaxR: 900, domainDuration: 7.0, domainDps: 22,
-    /* ★ 弥虚葛笼：身下生成跟随移动的绿色圆环，6 秒内免疫敌方领域 */
-    sdCost: 25, sdCd: 18, sdDuration: 6, sdR: 120,
+    /* ★ 弥虚葛笼：身下生成跟随移动的绿色圆环，4 秒内免疫敌方领域 */
+    sdCost: 25, sdCd: 18, sdDuration: 4, sdR: 120,
   },
   /* ★ 日车宽见 —— 审判控制型：领域内禁用敌方一切主动术式 */
   higuruma: {
@@ -261,7 +412,7 @@ let projectiles = [];
 let summons = [];
 let effects = [];
 let cam = { x:0, y:0 };
-let G = { state:'menu', time:0, shake:0, flash:0, clash:false, clashT:0 };
+let G = { state:'menu', time:0, shake:0, flash:0, clash:false, clashT:0, demo:false };
 let keys = {};
 let joy = { active:false, id:null, ox:0, oy:0, x:0, y:0 };
 let holdAttack = false;
@@ -290,7 +441,7 @@ function createFighter(type, x, y){
     blueCharge: 0,                 /* ★ 长按苍的蓄力计时 */
     blueSlow: 0, blueSlowMul: 1,   /* ★ 被吸附型苍减速的剩余时间 / 倍率 */
     brainDamaged: false,
-    cd: { blue:0, red:0, purple:0, domain:0, reverse:0, fire:0, dismantle:0, nue:0, dog:0, maho:0, tobi:0, space:0, shinuchi:0, sentence:0, heaven:0, chain:0, fly:0, sd:0 },
+    cd: { blue:0, red:0, purple:0, domain:0, reverse:0, fire:0, dismantle:0, nue:0, dog:0, maho:0, chimera:0, tobi:0, space:0, shinuchi:0, sentence:0, heaven:0, chain:0, fly:0, sd:0 },
     domainLock: 0,
     skillLock: 0,   /* 审判：术式禁用剩余时间 */
     sentence: 0,    /* 死刑：受到伤害提升剩余时间 */
@@ -358,6 +509,8 @@ function applySubtitle(){
 
 function showMenu(){
   G.state = 'menu';
+  G.demo = false;                  /* ★ 退出演示模式 */
+  clearTimeout(endGame._demoT);
   applySubtitle();                 /* ★ 每次回到菜单随机换一行 */
   menuEl.classList.remove('hidden');
   selectEl.classList.add('hidden');
@@ -368,12 +521,29 @@ function showMenu(){
   player = null; enemy = null;
 }
 
+/* ★ 选人界面的用途：pve = 玩家 vs 人机；demo = 两名角色都由 AI 操控的演示对战 */
+let selectMode = 'pve';
+
 function showSelect(){
   G.state = 'select';
   menuEl.classList.add('hidden');
   selectEl.classList.remove('hidden');
+  applySelectMode();
   lastSelect = { side: selectedPlayerType ? 'player' : 'ai', char: selectedPlayerType || selectedEnemyType };
   updateSelectUI();
+}
+
+/* ★ 根据用途切换选人界面的文案（演示模式下双方都是人机） */
+function applySelectMode(){
+  const demo = selectMode === 'demo';
+  const set = (id, txt) => { const e = document.getElementById(id); if (e) e.textContent = txt; };
+  set('selectTitle', demo ? '演 示 模 式' : '选 择 角 色');
+  set('selectHint', demo ? '任选两名角色 · 双方均由 AI 操控，自动对战'
+                         : '双方角色可自由指定 · 点击卡片查看详细术式');
+  set('sideLabelPlayer', demo ? '左侧人机' : '你的角色');
+  set('sideLabelAi', demo ? '右侧人机' : '人机角色');
+  set('aiLevelLabel', demo ? '双方难度' : '人机难度');
+  set('startBtn', demo ? '开 始 演 示' : '开 始 战 斗');
 }
 
 function updateSelectUI(){
@@ -403,16 +573,43 @@ document.querySelectorAll('.char-card').forEach(card => {
 
 document.getElementById('startBtn').addEventListener('click', () => {
   if (selectedPlayerType && selectedEnemyType)
-    startGame(selectedPlayerType, selectedEnemyType);
+    startGame(selectedPlayerType, selectedEnemyType, selectMode === 'demo');
 });
 document.getElementById('backBtn').addEventListener('click', () => showMenu());
+
+/* ★ 人机难度切换 */
+const aiLevelEl = document.getElementById('aiLevel');
+if (aiLevelEl){
+  aiLevelEl.querySelectorAll('.al-btn').forEach(b => {
+    b.addEventListener('click', () => {
+      AI_LEVEL = b.dataset.lv === 'pro' ? 'pro' : 'normal';
+      aiLevelEl.querySelectorAll('.al-btn').forEach(x => x.classList.toggle('on', x === b));
+    });
+  });
+}
+
+/* ★ 演示模式默认给一对随机角色（两名角色可在选人界面自由更换） */
+function pickDemoPair(){
+  const types = Object.keys(CFG);
+  const a = types[Math.floor(Math.random() * types.length)];
+  let b = types[Math.floor(Math.random() * types.length)];
+  let guard = 0;
+  while (b === a && ++guard < 20) b = types[Math.floor(Math.random() * types.length)];
+  selectedPlayerType = a;
+  selectedEnemyType = b;
+}
 
 document.querySelectorAll('.menu-btn[data-mode]').forEach(btn => {
   btn.addEventListener('click', () => {
     const mode = btn.dataset.mode;
     if (mode === 'pve'){
+      selectMode = 'pve';
       selectedPlayerType = 'gojo';
       selectedEnemyType = 'sukuna';
+      showSelect();
+    } else if (mode === 'demo'){
+      selectMode = 'demo';
+      pickDemoPair();          /* ★ 默认一对随机角色，仍可在选人界面改任一方 */
       showSelect();
     } else {
       const toast = document.getElementById('menuToast');
@@ -425,6 +622,12 @@ document.querySelectorAll('.menu-btn[data-mode]').forEach(btn => {
 });
 
 document.getElementById('restart').addEventListener('click', () => {
+  /* ★ 演示模式：按当前这组角色再来一场（想换角色可点「返回菜单」重新进） */
+  if (G.demo){
+    if (player && enemy) startGame(player.type, enemy.type, true);
+    else startGame(selectedPlayerType, selectedEnemyType, true);
+    return;
+  }
   if (selectedPlayerType && selectedEnemyType)
     startGame(selectedPlayerType, selectedEnemyType);
 });
@@ -433,19 +636,24 @@ document.getElementById('backToMenu').addEventListener('click', () => showMenu()
 /* ══════════════════════════════════════════
    开局
    ══════════════════════════════════════════ */
-function startGame(pType, eType){
+function startGame(pType, eType, demo){
   G.state = 'playing';
+  G.demo = !!demo;                      /* ★ 演示模式：双方均由 AI 控制 */
+  clearTimeout(endGame._demoT);         /* ★ 取消上一场的自动续场 */
   menuEl.classList.add('hidden');
   selectEl.classList.add('hidden');
   overlayEl.classList.remove('show');
   hudEl.style.display = '';
-  ctrlEl.style.display = '';
+  ctrlEl.style.display = G.demo ? 'none' : '';
   tipsEl.style.display = '';
   tipsEl.classList.remove('hide');
 
   player = createFighter(pType, 520, WORLD.h/2);
   enemy = createFighter(eType, 1200, WORLD.h/2);
   enemy.facing = Math.PI;
+  /* ★ 适用人机难度：敌方恒为 AI；演示模式下双方都是 AI */
+  player.aiPro = G.demo && AI_LEVEL === 'pro';
+  enemy.aiPro = AI_LEVEL === 'pro';
 
   projectiles = []; summons = []; effects = [];
   cam = { x:0, y:0 };
@@ -454,7 +662,8 @@ function startGame(pType, eType){
   joy.x = joy.y = 0; joy.active = false; joy.id = null;
   tipsHidden = false;
 
-  renderControls();
+  if (!G.demo) renderControls();
+  else { ctrlEl.innerHTML = ''; btns = {}; }
   updateHUDElements();
   updateTips();
   updateHUD();
@@ -464,6 +673,11 @@ function startGame(pType, eType){
 /* 底部操作提示：按当前角色的实际技能生成（无领域/无反转的角色不会出现错误提示） */
 function updateTips(){
   if (!tipsEl || !player) return;
+  if (G.demo){
+    tipsEl.innerHTML = '🎬 演示模式 · ' + player.name + ' VS ' + enemy.name +
+      ' · 两名人机自动对战<br>点击画面或按任意键返回菜单';
+    return;
+  }
   const list = SKILL_SETS[player.type] || [];
   const parts = ['WASD / 方向键 移动'];
   for (const s of list){
@@ -472,7 +686,9 @@ function updateTips(){
   }
   /* ★ 五条悟专属提示：长按苍 → 吸附型引力球 → 再接赫 = 大范围茈 */
   if (player.type === 'gojo') parts.push('长按 Q：苍·吸附 → 再按 E 赫 → 大范围茈');
-  tipsEl.innerHTML = parts.join(' · ') + '<br>手机：左侧拖动移动，右下按钮释放术式';
+  tipsEl.innerHTML = parts.join(' · ') +
+    (IS_MOBILE ? '<br>手机：左侧拖动移动 · 靠近敌人自动普攻 · 右下按钮释放术式'
+               : '<br>按 J 普攻 · 按键或点击右下按钮释放术式');
 }
 
 /* ══════════════════════════════════════════
@@ -584,6 +800,7 @@ const SKILL_SETS = {
     { act:'dog',          label:'玉犬',      sub:'E', cls:'red' },
     { act:'tobi',         label:'脱兔',      sub:'T', cls:'tobi' },
     { act:'mahoraga',     label:'魔虚罗',    sub:'R', cls:'shadow' },
+    { act:'chimera',      label:'嵌合兽',    sub:'V', cls:'chimera' },
     { act:'attack',       label:'斩击',      sub:'J', cls:'attackbtn' },
   ],
   higuruma: [
@@ -614,7 +831,7 @@ const CHAR_INFO = {
       ['苍', 'Q · 引力球，吸附并拉扯敌人；长按 → 吸附型：滞空、把敌人拉向球心并减速'],
       ['赫', 'E · 斥力球，命中强力击退；场上若有吸附型苍，则被其牵引'],
       ['茈', 'R · 需先释放 苍+赫，贯穿大伤害；赫 撞上吸附型苍 → 范围 480 紫色冲击波「茈」'],
-      ['简易领域', 'C · 脚下展开绿色圆环（跟随移动 6 秒）：其间敌方领域对你完全无效'],
+      ['简易领域', 'C · 脚下展开绿色圆环（跟随移动 4 秒）：其间敌方领域对你完全无效'],
       ['无量空处', '空格 · 领域，僵直敌方并封印领域 20 秒'],
       ['反转术式', 'H · 回复生命 / 修复受损大脑'],
       ['破脑', 'P · 自伤以重置领域冷却'],
@@ -628,7 +845,7 @@ const CHAR_INFO = {
       ['解', 'Q · 高速大范围斩击，可贯穿'],
       ['开', 'E · 火焰弹'],
       ['伏魔御厨子', '空格 · 领域，持续灼烧且不断扩张'],
-      ['弥虚葛笼', 'C · 脚下展开绿色圆环（跟随移动 6 秒）：其间敌方领域对你完全无效'],
+      ['弥虚葛笼', 'C · 脚下展开绿色圆环（跟随移动 4 秒）：其间敌方领域对你完全无效'],
       ['反转术式', 'H · 回复生命'],
     ],
   },
@@ -640,8 +857,9 @@ const CHAR_INFO = {
       ['鵺', 'Q · 追踪雷电鸟'],
       ['玉犬', 'E · 召唤 2 只玉犬（各 120 HP）'],
       ['魔虚罗', 'R · 白球+法轮，会适应减伤；场上限 1 只'],
+      ['嵌合兽', 'V · 橙色巨躯（与魔虚罗同体积），贴身撕咬；12 秒后消散'],
       ['空间斩', 'F · 魔虚罗陨落后解锁，命中即巨额伤害'],
-      ['弥虚葛笼', 'C · 脚下展开绿色圆环（跟随移动 6 秒）：其间敌方领域对你完全无效（含己方式神）'],
+      ['弥虚葛笼', 'C · 脚下展开绿色圆环（跟随移动 4 秒）：其间敌方领域对你完全无效（含己方式神）'],
       ['伏魔御厨子', '空格 · 领域（削弱版）'],
       ['反转术式', 'H · 回复生命'],
     ],
@@ -683,7 +901,9 @@ function showCharInfo(side, char){
     return;
   }
   const info = CHAR_INFO[char];
-  const sideLabel = side === 'player' ? '你的角色' : '人机角色';
+  const demo = selectMode === 'demo';
+  const sideLabel = side === 'player' ? (demo ? '左侧人机' : '你的角色')
+                                      : (demo ? '右侧人机' : '人机角色');
   const color = nameColor(char);
   let html = `<div class="ci-head"><span class="ci-name" style="color:${color}">${info.title}</span><span class="ci-side">${sideLabel}</span></div>`;
   html += `<div class="ci-stats">${info.stats}</div><div class="ci-skills">`;
@@ -699,7 +919,7 @@ function showCharInfo(side, char){
    1 = 状态类与低频术式（最上排）  2 = 召唤类中频  3 = 高频输出与保命  9 = 普攻（固定最后） */
 const SKILL_PRIORITY = {
   domain:1, infinity:1, brainbreak:1, bluefist:1,
-  dog:2, tobi:2, mahoraga:2, fly:2,
+  dog:2, tobi:2, mahoraga:2, chimera:2, fly:2,
   reverse:3, blue:3, red:3, purple:3, fire:3, dismantle:3,
   space:3, nue:3, shinuchi:3, sentence:3, heaven:3, chain:3, simpledomain:3,
   attack:9,
@@ -711,7 +931,7 @@ const COST_FIELD = {
   bluefist:'bfCost',
   blue:'blueCost', red:'redCost', purple:'purpleCost', reverse:'reverseCost', domain:'domainCost',
   fire:'fireCost', dismantle:'dismantleCost',
-  nue:'nueCost', dog:'dogCost', tobi:'tobiCost', mahoraga:'mahoCost', space:'spaceCost',
+  nue:'nueCost', dog:'dogCost', tobi:'tobiCost', mahoraga:'mahoCost', chimera:'chimeraCost', space:'spaceCost',
   shinuchi:'shinuchiCost', sentence:'sentenceCost',
   heaven:'heavenCost', chain:'chainCost', fly:'flyCost', simpledomain:'sdCost',
 };
@@ -764,6 +984,7 @@ function makeSkillBtn(s){
     e.preventDefault(); e.stopPropagation();
     hideTips();
     tryLockLandscape();
+    unlockSfx();
     if (G.state !== 'playing' || !player || !player.alive) return;
     if (s.act === 'attack') holdAttack = true;
     handleAction(s.act);
@@ -901,6 +1122,12 @@ function handleAction(act){
       text:'审判 · 术式被禁止', color:'#ff9a9a', size:14 });
     return;
   }
+  /* ★ 领域展开期间：除普攻外一切术式禁用 */
+  if (act !== 'attack' && player && player.domain){
+    addEffect({ type:'text', x:player.x, y:player.y-62, t:0, life:1.0,
+      text:'领域展开中 · 只能普攻', color:'#ffc0c0', size:14 });
+    return;
+  }
   switch(act){
     case 'attack':     basicAttack(player, enemy); break;
     case 'domain':     castDomain(player, enemy); break;
@@ -916,6 +1143,7 @@ function handleAction(act){
     case 'dog':        tsDog(player); break;
     case 'tobi':       tsTobi(player); break;
     case 'mahoraga':   tsMahoraga(player); break;
+    case 'chimera':    tsChimera(player); break;
     case 'space':      tsSpaceSlash(player, enemy); break;
     case 'brainbreak': brainBreak(player); break;
     case 'shinuchi':   higurumaShinuchi(player, enemy); break;
@@ -950,6 +1178,10 @@ window.addEventListener('keydown', e => {
   if ([' ','arrowup','arrowdown','arrowleft','arrowright'].includes(k)) e.preventDefault();
   if (e.repeat) return;
   keys[k] = true;
+  unlockSfx();                                   /* ★ 首次按键解锁音效播放权限 */
+  if (k === 'm'){ toggleMute(); return; }        /* ★ M 键开关音效（任何界面可用） */
+  /* ★ 演示模式：任意键退出，回到菜单 */
+  if (G.demo && (G.state === 'playing' || G.state === 'intro')){ showMenu(); return; }
   /* ★ 开场对白：任意键补完当前句 / 推进 */
   if (G.state === 'intro'){ skipIntro(); return; }
   if (G.state !== 'playing' || !player || !player.alive) return;
@@ -961,6 +1193,9 @@ window.addEventListener('keyup', e => { keys[e.key.toLowerCase()] = false; });
 window.addEventListener('blur', () => { keys = {}; holdAttack = false; blueHoldBtn = false; joy.x = joy.y = 0; });
 
 canvas.addEventListener('pointerdown', e => {
+  unlockSfx();
+  /* ★ 演示模式：点击画面退出，回到菜单 */
+  if (G.demo && (G.state === 'playing' || G.state === 'intro')){ showMenu(); return; }
   if (G.state === 'intro'){ skipIntro(); return; }
   if (G.state !== 'playing') return;
   if (joy.id !== null) return;
@@ -1009,6 +1244,7 @@ function brainBreak(f){
   f.cd.domain = 0;
 
   addEffect({ type:'brainbreak', x:f.x, y:f.y, t:0, life:1.0 });
+  playSfx('brainbreak', f.type, f === player ? 1 : 0.6);
   addEffect({ type:'text', x:f.x, y:f.y-88, t:0, life:1.7,
     text:'破坏大脑 · 领域回路重置！', color:'#ff8a3d', size:18 });
   G.shake = 18; G.flash = 0.45;
@@ -1064,6 +1300,7 @@ function moveSpeed(f){
   let spd = f.speed;
   if (f.sentence > 0) spd *= (1 - CFG.higuruma.sentenceSlow);   /* 被宣告死刑：减速 */
   if (f.blueSlow > 0) spd *= (f.blueSlowMul || 1);              /* ★ 被吸附型苍减速 */
+  if (f.aiPro) spd *= AI_TUNE.pro.speed;                        /* ★ 熟练人机：移动更快 */
   if (f.type === 'higuruma'){
     if (inOwnHigurumaDomain(f)) spd *= CFG.higuruma.domainSpeedMul;
     const foe = f === player ? enemy : player;
@@ -1162,6 +1399,7 @@ function castReverse(f){
 
   f.ce -= c.reverseCost;
   f.cd.reverse = c.reverseCd;
+  playSfx('reverse', f.type, f === player ? 1 : 0.5);
 
   if (f.brainDamaged){
     f.brainDamaged = false;
@@ -1212,6 +1450,8 @@ function castDomain(f, target){
   };
   const text = '领域展开 · ' + (c.domainName || '');
   const color = f.type === 'gojo' ? '#c9a4ff' : '#ff5c5c';
+  playSfx('domain', f.type, f === player ? 1 : 0.65);         /* ★ 角色专属领域音效（domain1/domain2 随机） */
+  playSfx('domainSpawn', f.type, f === player ? 0.8 : 0.5);   /* ★ 通用「领域生成中」音效 */
   addEffect({ type:'text', x:f.x, y:f.y-90, t:0, life:2.4, text, color, size:26 });
   addEffect({ type:'ring', x:f.x, y:f.y, t:0, life:0.8, r0:10, r1:400, color, width:8 });
   G.shake = 28; G.flash = 0.55;
@@ -1266,6 +1506,7 @@ function gojoBlue(gojo, target){
     charged:false,        /* ★ 长按后由 tickBlueCharge 升级 */
     damage:c.blueDmg, hitCd:0,
   });
+  playSfx('blue', gojo.type, gojo === player ? 1 : 0.55);
   addEffect({ type:'ring', x:gojo.x, y:gojo.y, t:0, life:0.3, r0:8, r1:56, color:'#4aa8ff', width:3 });
 }
 
@@ -1293,6 +1534,7 @@ function gojoRed(gojo, target){
   if (orb) addEffect({ type:'text', x:gojo.x, y:gojo.y-74, t:0, life:1.1,
     text:'赫 → 苍 · 引力共鸣', color:'#ffb37a', size:16 });
   addEffect({ type:'ring', x:gojo.x, y:gojo.y, t:0, life:0.35, r0:8, r1:70, color:'#ff4a4a', width:4 });
+  playSfx('red', gojo.type, gojo === player ? 1 : 0.55);
 }
 
 /* ★ 赫撞上吸附型苍：大范围（480）紫色冲击波「茈」 */
@@ -1306,6 +1548,7 @@ function purpleBlast(x, y, owner){
   addEffect({ type:'text', x, y:y-96, t:0, life:1.3, text:'虚式 · 茈', color:'#d9a6ff', size:26 });
   spawnBurst(x, y, '#c07bff', 32, 260, 900, 3, 8);
   spawnBurst(x, y, '#ffffff', 16, 180, 640, 2, 6);
+  playSfx('purpleBlast', owner ? owner.type : 'gojo', owner === player ? 1 : 0.7);
   G.shake = Math.max(G.shake, 34);
   G.flash = Math.max(G.flash, 0.5);
 
@@ -1340,6 +1583,7 @@ function gojoPurple(gojo, target){
   });
   addEffect({ type:'ring', x:gojo.x, y:gojo.y, t:0, life:0.5, r0:10, r1:120, color:'#c07bff', width:6 });
   addEffect({ type:'text', x:gojo.x, y:gojo.y-70, t:0, life:1.0, text:'虚式 · 茈', color:'#c07bff', size:20 });
+  playSfx('purple', gojo.type, gojo === player ? 1 : 0.6);
 }
 
 function toggleInfinity(f){
@@ -1374,6 +1618,7 @@ function sukunaFire(s, target){
     r:30, life:2.0, damage:c.fireDmg,
   });
   addEffect({ type:'text', x:s.x, y:s.y-58, t:0, life:0.9, text:'开', color:'#ff8a3d', size:20 });
+  playSfx('fire', s.type, s === player ? 1 : 0.55);
 }
 
 function sukunaDismantle(s, target){
@@ -1392,6 +1637,7 @@ function sukunaDismantle(s, target){
   });
   addEffect({ type:'ring', x:s.x, y:s.y, t:0, life:0.35, r0:10, r1:80, color:'#c07bff', width:5 });
   addEffect({ type:'text', x:s.x, y:s.y-70, t:0, life:0.9, text:'解', color:'#c07bff', size:22 });
+  playSfx('dismantle', s.type, s === player ? 1 : 0.55);
   G.shake = Math.max(G.shake, 8);
 }
 
@@ -1447,6 +1693,53 @@ function tsDog(s){
   }
   addEffect({ type:'ring', x:s.x, y:s.y, t:0, life:0.5, r0:10, r1:90, color:'#ff8a3d', width:4 });
   addEffect({ type:'text', x:s.x, y:s.y-58, t:0, life:1.0, text:'玉犬', color:'#ff8a3d', size:20 });
+}
+
+/* ★ 嵌合兽：体积与魔虚罗相同（r=40）· 攻击逻辑类似玉犬（贴身撕咬）· 橙色底色 */
+function tsChimera(s){
+  const c = CFG.sukunaTs;
+  if (!s.alive || s.stun > 0 || s.cd.chimera > 0 || s.ce < c.chimeraCost) return;
+
+  /* ★ 召唤上限：场上已有己方嵌合兽则无法再次召唤 */
+  for (const sm of summons){
+    if (sm && sm.owner === s && sm.type === 'chimera' && sm.hp > 0){
+      if (s === player)
+        addEffect({ type:'text', x:s.x, y:s.y-62, t:0, life:1.0,
+          text:'已有嵌合兽在场', color:'#ffa93d', size:13 });
+      return;
+    }
+  }
+
+  s.ce -= c.chimeraCost;
+  s.cd.chimera = c.chimeraCd;
+  const facing = finite(s.facing) ? s.facing : 0;
+  summons.push({
+    type: 'chimera',
+    owner: s,
+    x: s.x + Math.cos(facing) * 62,
+    y: s.y + Math.sin(facing) * 62,
+    r: 40,                                  /* 与魔虚罗同体积 */
+    speed: c.chimeraSpeed,
+    life: c.chimeraDur, maxLife: c.chimeraDur,
+    hp: c.chimeraHp, maxHp: c.chimeraHp,
+    damage: c.chimeraDmg,
+    hitCd: 0,
+    hitFlash: 0,
+    stun: 0,
+    attackInterval: c.chimeraAtkInterval,
+    angle: facing,
+    slashAnim: 0,
+    chimeraPhase: 0,                        /* 嘴部开合 / 鬃毛波动相位 */
+  });
+  addEffect({ type:'ring', x:s.x, y:s.y, t:0, life:0.7, r0:16, r1:180, color:'#ff9a2e', width:7 });
+  addEffect({ type:'text', x:s.x, y:s.y-70, t:0, life:1.5, text:'嵌合兽 · 显现', color:'#ffc46a', size:20 });
+  for (let k = 0; k < 18; k++){
+    addEffect({ type:'spark', x:s.x + Math.cos(facing)*62, y:s.y + Math.sin(facing)*62, t:0, life:rnd(.35,.8),
+      vx:Math.cos(rnd(0,TAU))*rnd(80,300), vy:Math.sin(rnd(0,TAU))*rnd(80,300),
+      color:'#ffb14a', size:rnd(2,4.5) });
+  }
+  G.shake = Math.max(G.shake, 18);
+  G.flash = Math.max(G.flash, 0.32);
 }
 
 function tsMahoraga(s){
@@ -1640,11 +1933,12 @@ function higurumaSentence(s){
 /* ★ 日车宽见 AI：先贴「死刑」，再开庭，领域内靠普攻收人头 */
 function aiHiguruma(ai, target, d, ang){
   const c = CFG.higuruma;
+  const tune = aiTune(ai);
   const marked = target.sentence > 0;
 
-  /* 开庭：把敌人关进法庭 */
-  if (ai.cd.domain <= 0 && ai.ce >= c.domainCost && !ai.domain && !player.domain &&
-      (d < 320 || target.hp < target.maxHp*0.6)) castDomain(ai, target);
+  /* 开庭：把敌人关进法庭（熟练人机更早开庭） */
+  if (ai.cd.domain <= 0 && ai.ce >= c.domainCost && !ai.domain && !target.domain &&
+      (d < tune.domD + 35 || target.hp < target.maxHp*tune.domHp)) castDomain(ai, target);
 
   /* 死刑宣告：没有标记就贴上去宣告 */
   if (!marked && ai.cd.sentence <= 0 && ai.ce >= c.sentenceCost &&
@@ -1673,9 +1967,11 @@ function aiHiguruma(ai, target, d, ang){
 /* ★ 伏黑甚尔 AI：贴身压制，万里锁留人，天逆鉾封术式 */
 function aiToji(ai, target, d, ang){
   const c = CFG.toji;
+  /* ★ 熟练人机：抢钩距离更宽、更贴脸的压制 */
+  const chainMin = ai.aiPro ? 70 : 120;
 
   /* 万里锁：中远距离先钩住，把敌人拽进自己的近战节奏 */
-  if (ai.cd.chain <= 0 && ai.ce >= c.chainCost && d > 120 && d < c.chainRange) tojiChain(ai, target);
+  if (ai.cd.chain <= 0 && ai.ce >= c.chainCost && d > chainMin && d < c.chainRange) tojiChain(ai, target);
 
   /* 天逆鉾：优先在敌人准备开领域 / 术式未被封时封印他 */
   if (ai.cd.heaven <= 0 && ai.ce >= c.heavenCost && d < 640 &&
@@ -1888,6 +2184,19 @@ function endGame(result){
     const t = document.getElementById('ov-title');
     const s = document.getElementById('ov-sub');
     if (!overlayEl || !t || !s) return;
+    if (G.demo){
+      /* ★ 演示模式：中立结算，自动开启下一场随机对战 */
+      const winner = (result === 'win') ? player : enemy;
+      t.textContent = '对 局 结 束';
+      t.style.color = '#eef2f6';
+      s.textContent = winner.name + ' 获胜 · 即将重开这一场（换角色请返回菜单）';
+      overlayEl.classList.add('show');
+      clearTimeout(endGame._demoT);
+      endGame._demoT = setTimeout(() => {
+        if (G.demo && player && enemy) startGame(player.type, enemy.type, true);
+      }, 5200);
+      return;
+    }
     if (result === 'win'){
       t.textContent = '胜 利';
       t.style.color = '#eef2f6';
@@ -1940,8 +2249,10 @@ function update(dt){
   if (!player || !enemy) return;
   G.time += dt;
 
-  updatePlayer(dt);
-  updateAI(dt);
+  /* ★ 演示模式：双方都交给 AI；否则玩家侧走输入 */
+  if (G.demo) aiThink(dt, player, enemy);
+  else updatePlayer(dt);
+  aiThink(dt, enemy, player);
   /* ★ 万里锁拖拽：在双方位移结算之后接管位置 */
   applyPull(player, dt);
   applyPull(enemy, dt);
@@ -1955,8 +2266,8 @@ function update(dt){
 
 function updateCamera(){
   if (!player) return;
-  /* ★ 开场对白期间：拉远镜头，把两人同时纳入取景 */
-  const framing = !!(introTalk && enemy);
+  /* ★ 开场对白期间 / 演示模式：拉远镜头，把两人同时纳入取景 */
+  const framing = !!((introTalk && enemy) || (G.demo && enemy));
   if (framing){
     const needW = Math.abs(enemy.x - player.x) + 560;
     const needH = 560;
@@ -2030,11 +2341,16 @@ function updatePlayer(dt){
   /* ★ 长按「苍」蓄力：把刚发射的苍升级为吸附型引力球 */
   if (p.type === 'gojo') tickBlueCharge(p, dt);
 
-  if (keys['j'] || holdAttack) basicAttack(p, enemy);
+  /* ★ 移动端自动攻击：敌人进入射程就自动普攻，无需按住普攻键 */
+  const autoAtk = IS_MOBILE && enemy && enemy.alive &&
+                  dist(p, enemy) <= (isMeleeType(p.type) ? (p.r + enemy.r + c.atkRange) : AUTO_ATK_RANGE);
+  if (keys['j'] || holdAttack || autoAtk) basicAttack(p, enemy);
 }
 
-function updateAI(dt){
-  const ai = enemy, target = player;
+/* ══════════════════════════════════════════
+   ★ 通用 AI 决策（enemy 用、演示模式时 player 也用同一套）
+   ══════════════════════════════════════════ */
+function aiThink(dt, ai, target){
   if (!ai || !ai.alive) return;
   const c = CFG[ai.type];
 
@@ -2067,30 +2383,31 @@ function updateAI(dt){
   const ang = Math.atan2(target.y-ai.y, target.x-ai.x);
   if (finite(ang)) ai.facing = ang;
 
-  /* ★ 审判：术式被禁止时只能走位 + 普攻 */
-  const sealed = ai.skillLock > 0;
+  /* ★ 审判封印 / 自身领域展开期间：只能走位 + 普攻 */
+  const locked = ai.skillLock > 0;
+  const sealed = locked || !!ai.domain;
 
   let mv = { x: 0, y: 0 };
   if (sealed){
-    ai.infinity = false;
-    ai.blueFist = false;
+    if (locked){ ai.infinity = false; ai.blueFist = false; }
     mv = aiMoveOnly(ai, target, d, ang);
   } else {
     /* ① 保命优先：大脑受损 / 残血时先修反转术式 */
-    const lowHp = hasReverse(ai.type) && ai.hp < ai.maxHp * c.reverseThreshold;
+    const tune = aiTune(ai);
+    const lowHp = hasReverse(ai.type) && ai.hp < ai.maxHp * c.reverseThreshold * tune.healAt;
     if ((ai.brainDamaged || lowHp) && ai.cd.reverse <= 0 && ai.ce >= c.reverseCost) castReverse(ai);
 
-    /* ② 玩家展开领域 → 先看能否用简易领域/弥虚葛笼硬顶，否则同步展开对冲 */
-    if (player.domain && !protectedBySimpleDomain(ai) && finite(c.sdCost) &&
+    /* ② 敌方展开领域 → 先看能否用简易领域/弥虚葛笼硬顶，否则同步展开对冲 */
+    if (target.domain && !protectedBySimpleDomain(ai) && finite(c.sdCost) &&
         ai.cd.sd <= 0 && !ai.sd && ai.ce >= c.sdCost &&
-        dist(ai, player.domain) < player.domain.r + 40){
+        dist(ai, target.domain) < target.domain.r + 40){
       castSimpleDomain(ai);      /* ★ 站在敌方领域里：以简易领域无效化 */
     }
-    if (c.domainName && player.domain && !enemy.domain && enemy.domainLock <= 0 && enemy.ce >= c.domainCost && !enemy.brainDamaged){
-      enemy.cd.domain = 0;
-      castDomain(enemy, player);
-      addEffect({ type:'text', x:enemy.x, y:enemy.y-118, t:0, life:1.8,
-        text: enemy.name + ' 同步展开领域！', color:'#ffb0b0', size:16 });
+    if (c.domainName && target.domain && !ai.domain && ai.domainLock <= 0 && ai.ce >= c.domainCost && !ai.brainDamaged){
+      ai.cd.domain = 0;
+      castDomain(ai, target);
+      addEffect({ type:'text', x:ai.x, y:ai.y-118, t:0, life:1.8,
+        text: ai.name + ' 同步展开领域！', color:'#ffb0b0', size:16 });
     }
 
     /* ③ 角色专属决策（各自发挥优势） */
@@ -2120,6 +2437,7 @@ function updateAI(dt){
 
 /* 闪避检测：返回垂直于威胁投射物的方向；无威胁返回 null */
 function aiDodge(ai, dt){
+  const tune = aiTune(ai);
   let threat = null, bestD = 1e9;
   for (const pr of projectiles){
     if (!pr || pr.owner === ai) continue;
@@ -2133,7 +2451,7 @@ function aiDodge(ai, dt){
     while (diff > Math.PI) diff -= TAU;
     while (diff < -Math.PI) diff += TAU;
     const dd = dist(pr, ai);
-    if (Math.abs(diff) < 0.30 && dd < 380 && dd < bestD){ threat = pr; bestD = dd; }
+    if (Math.abs(diff) < tune.dodgeCone && dd < tune.dodgeR && dd < bestD){ threat = pr; bestD = dd; }
   }
   if (!threat) return null;
   const dir = Math.atan2(threat.vy || 0, threat.vx || 0);
@@ -2143,6 +2461,7 @@ function aiDodge(ai, dt){
 /* ★ 五条悟：中远距离压制 · 苍→赫→茈连招 · 无下限防守 · 抓僵直贴身爆发 */
 function aiGojo(ai, target, d, ang){
   const c = CFG.gojo;
+  const tune = aiTune(ai);
 
   /* 机会窗口：玩家被僵直（如无量空处）时立刻贴身爆发，而不是继续拉开距离 */
   const punish = target.stun > 0;
@@ -2155,9 +2474,9 @@ function aiGojo(ai, target, d, ang){
   if (!ai.brainDamaged && ai.cd.domain > 5 && ai.hp > ai.maxHp * 0.8 &&
       ai.ce < 30 && d < 420 && Math.random() < 0.02) brainBreak(ai);
 
-  /* 领域：玩家残血 / 身处范围内 / 已被僵直 → 直接展开扩大优势 */
-  if (ai.cd.domain <= 0 && ai.ce >= c.domainCost && !ai.domain && !player.domain &&
-      !ai.brainDamaged && (target.hp < target.maxHp*0.55 || d < 285 || punish))
+  /* 领域：对手残血 / 身处范围内 / 已被僵直 → 直接展开扩大优势（熟练人机更早开） */
+  if (ai.cd.domain <= 0 && ai.ce >= c.domainCost && !ai.domain && !target.domain &&
+      !ai.brainDamaged && (target.hp < target.maxHp*tune.domHp || d < tune.domD || punish))
     castDomain(ai, target);
 
   /* 连招：苍（吸附）→ 赫（击退）→ 茈（终结） */
@@ -2166,12 +2485,12 @@ function aiGojo(ai, target, d, ang){
 
   /* 僵直贴脸时不用「赫」，避免把到手的猎物击飞出近身范围 */
   const avoidRed = punish && d < 220;
-  if (!avoidRed && !ai.redUsed && ai.cd.red <= 0 && ai.ce >= c.redCost + 14 && d < 470 && Math.random() < 0.7)
+  if (!avoidRed && !ai.redUsed && ai.cd.red <= 0 && ai.ce >= c.redCost + tune.reserve && d < 470 && aiChance(ai, 0.7))
     gojoRed(ai, target);
 
-  /* 苍：把玩家吸进拳头范围（僵直时更积极） */
-  if (!ai.blueUsed && ai.cd.blue <= 0 && ai.ce >= c.blueCost + 14 &&
-      (punish ? d > 60 : d > 130) && Math.random() < (punish ? 0.9 : 0.7))
+  /* 苍：把对手吸进拳头范围（僵直时更积极） */
+  if (!ai.blueUsed && ai.cd.blue <= 0 && ai.ce >= c.blueCost + tune.reserve &&
+      (punish ? d > 60 : d > 130) && aiChance(ai, punish ? 0.9 : 0.7))
     gojoBlue(ai, target);
 
   /* 苍拳：僵直时咒力够就开，并全力贴身输出 */
@@ -2195,6 +2514,7 @@ function aiGojo(ai, target, d, ang){
 /* ★ 两面宿傩：贴身连斩 · 斩击压制 · 解/开 收尾 */
 function aiSukuna(ai, target, d, ang){
   const c = CFG.sukuna;
+  const tune = aiTune(ai);
 
   /* 斩击：主要输出手段，频率高 */
   if (ai.attackCd <= 0 && d < 580){
@@ -2203,13 +2523,13 @@ function aiSukuna(ai, target, d, ang){
     const sAng = Math.atan2(aim.y-ai.y, aim.x-ai.x);
     spawnSlash(ai, sAng, rnd(-0.13, 0.13), '#ff6b8a');
   }
-  if (ai.cd.dismantle <= 0 && ai.ce >= c.dismantleCost && d < 640 && Math.random() < 0.65)
+  if (ai.cd.dismantle <= 0 && ai.ce >= c.dismantleCost + tune.reserve && d < 640 && aiChance(ai, 0.65))
     sukunaDismantle(ai, target);
-  if (ai.cd.fire <= 0 && ai.ce >= c.fireCost && d < 440 && d > 110 && Math.random() < 0.7)
+  if (ai.cd.fire <= 0 && ai.ce >= c.fireCost + tune.reserve && d < 440 && d > 110 && aiChance(ai, 0.7))
     sukunaFire(ai, target);
 
-  if (ai.cd.domain <= 0 && ai.ce >= c.domainCost && !ai.domain && !player.domain &&
-      (d < 400 || target.hp < target.maxHp*0.55)) castDomain(ai, target);
+  if (ai.cd.domain <= 0 && ai.ce >= c.domainCost && !ai.domain && !target.domain &&
+      (d < tune.domD + 115 || target.hp < target.maxHp*tune.domHp)) castDomain(ai, target);
 
   /* 走位：压近到 95~175，偶尔后撤重置节奏 */
   let m = 0;
@@ -2224,25 +2544,30 @@ function aiSukuna(ai, target, d, ang){
 /* ★ 十影宿傩：式神军团消耗战 · 后排输出 · 空间斩斩杀 */
 function aiSukunaTs(ai, target, d, ang){
   const c = CFG.sukunaTs;
+  const tune = aiTune(ai);
 
-  let myMaho = 0, myDog = 0;
+  let myMaho = 0, myDog = 0, myChimera = 0;
   for (const s of summons){
     if (!s || s.owner !== ai) continue;
     if (s.type === 'mahoraga') myMaho++;
     else if (s.type === 'dog') myDog++;
+    else if (s.type === 'chimera' && s.hp > 0) myChimera++;
   }
   const hurt = ai.hp < ai.maxHp * 0.75;
 
   /* 先手召唤魔虚罗：既是肉盾，也是解锁空间斩的钥匙 */
   if (myMaho === 0 && ai.cd.maho <= 0 && ai.ce >= c.mahoCost &&
       (hurt || d < 460 || target.hp < target.maxHp*0.85)) tsMahoraga(ai);
+  /* ★ 嵌合兽：与魔虚罗同级的巨型前排，撕咬型持续输出 */
+  if (myChimera === 0 && ai.cd.chimera <= 0 && ai.ce >= c.chimeraCost &&
+      (hurt || d < 520 || target.hp < target.maxHp*0.9)) tsChimera(ai);
   if (myDog < 2 && ai.cd.dog <= 0 && ai.ce >= c.dogCost && d < 560) tsDog(ai);
-  if (ai.cd.tobi <= 0 && ai.ce >= c.tobiCost && d < 620 && Math.random() < 0.5) tsTobi(ai);
-  if (ai.cd.nue <= 0 && ai.ce >= c.nueCost && d < 640 && Math.random() < 0.7) tsNue(ai, target);
+  if (ai.cd.tobi <= 0 && ai.ce >= c.tobiCost && d < 620 && aiChance(ai, 0.5)) tsTobi(ai);
+  if (ai.cd.nue <= 0 && ai.ce >= c.nueCost + tune.reserve && d < 640 && aiChance(ai, 0.7)) tsNue(ai, target);
 
   /* 空间斩：解锁后的主要斩杀手段 */
   if (ai.spaceUnlocked && ai.cd.space <= 0 && ai.ce >= c.spaceCost && d < 640 &&
-      (target.hp < target.maxHp*0.7 || Math.random() < 0.45)) tsSpaceSlash(ai, target);
+      (target.hp < target.maxHp*0.7 || aiChance(ai, 0.45))) tsSpaceSlash(ai, target);
 
   if (ai.attackCd <= 0 && d < 540){
     ai.attackCd = rnd(0.30, 0.44);
@@ -2251,7 +2576,8 @@ function aiSukunaTs(ai, target, d, ang){
     spawnSlash(ai, sAng, rnd(-0.13, 0.13), '#c9a4ff');
   }
 
-  if (ai.cd.domain <= 0 && ai.ce >= c.domainCost && !ai.domain && !player.domain && d < 440)
+  if (ai.cd.domain <= 0 && ai.ce >= c.domainCost && !ai.domain && !target.domain &&
+      (d < 440 || target.hp < target.maxHp*tune.domHp))
     castDomain(ai, target);
 
   /* 走位：让式神顶在前面，自己保持 280~470 的输出距离 */
@@ -2560,6 +2886,8 @@ function updateSummons(dt){
     if (!finite(s.maxHp) || s.maxHp <= 0) s.maxHp = Math.max(1, s.hp);
     if (s.hitFlash > 0) s.hitFlash -= dt;
     if (s.slashAnim > 0) s.slashAnim -= dt;
+    if (s.biteAnim > 0) s.biteAnim -= dt;
+    if (s.chimeraPhase !== undefined) s.chimeraPhase += dt;
     if (s.stun > 0) s.stun -= dt;
     if (s.sentence > 0) s.sentence -= dt;
 
@@ -2620,13 +2948,15 @@ function updateSummons(dt){
       if (s.hitCd <= 0){
         s.hitCd = s.attackInterval || 0.5;
         const isMaho = s.type === 'mahoraga';
-        const col = isMaho ? '#ffd76a' : '#ff8a3d';
+        const isChimera = s.type === 'chimera';
+        const col = isMaho ? '#ffd76a' : (isChimera ? '#ffa32e' : '#ff8a3d');
         if (isMaho) s.slashAnim = 0.22;   /* 魔虚罗：砍击动作 */
+        if (isChimera) s.biteAnim = 0.26; /* 嵌合兽：撕咬动作 */
         damage(target, s.damage || 20);
 
         addEffect({ type:'ring', x:target.x, y:target.y, t:0, life:0.3,
           r0:6, r1:(s.r||16)*2.2, color:col, width:3.5 });
-        spawnBurst(target.x, target.y, col, isMaho ? 12 : 4, 80, 280, 2, 4);
+        spawnBurst(target.x, target.y, col, isMaho ? 12 : (isChimera ? 10 : 4), 80, 280, 2, 4);
       }
     }
   }
@@ -2650,6 +2980,19 @@ function removeSummon(i, s){
         G.flash = Math.max(G.flash, 0.35);
       } else {
         addEffect({ type:'ring', x:s.x, y:s.y, t:0, life:0.5, r0:6, r1:130, color:'#ffd76a', width:4 });
+      }
+    } else if (s.type === 'chimera'){
+      /* ★ 嵌合兽：橙色巨躯崩解 */
+      const big = killed || !s.owner || !s.owner.alive;
+      addEffect({ type:'ring', x:s.x, y:s.y, t:0, life: big ? 0.9 : 0.45,
+        r0:10, r1: big ? 210 : 120, color:'#ff9a2e', width: big ? 7 : 4 });
+      if (big){
+        for (let k=0;k<16;k++){
+          addEffect({ type:'spark', x:s.x, y:s.y, t:0, life:rnd(.35,.8),
+            vx:Math.cos(rnd(0,TAU))*rnd(90,340), vy:Math.sin(rnd(0,TAU))*rnd(90,340),
+            color:'#ffb14a', size:rnd(2,5) });
+        }
+        G.shake = Math.max(G.shake, 12);
       }
     } else {
       addEffect({ type:'ring', x:s.x, y:s.y, t:0, life:0.4,
@@ -2726,7 +3069,7 @@ function domainSlashPalette(type){
   return { a:'#ff3b3b', b:'#ff8a6a' };                            /* 两面宿傩：红 */
 }
 
-function spawnDomainSlash(type, x, y){
+function spawnDomainSlash(type, x, y, owner){
   const pal = domainSlashPalette(type);
   const n = Math.random() < 0.3 ? 2 : 1;       /* 偶尔来一记交叉斩 */
   for (let i = 0; i < n; i++){
@@ -2740,6 +3083,13 @@ function spawnDomainSlash(type, x, y){
       color: pal.a, color2: pal.b,
       width: rnd(5, 8),
     });
+  }
+  /* ★ 斩击音效：视觉 11 刀/秒，音频按 SLASH_SFX_GAP 限流后才播放
+     （仅两面宿傩配置了 slash 音效，十影宿傩自动静默） */
+  const now = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+  if (now - slashSfxAt >= SLASH_SFX_GAP){
+    slashSfxAt = now;
+    playSfx('slash', type, owner === player ? 1 : 0.5);
   }
 }
 
@@ -2789,7 +3139,7 @@ function applyDomainEffect(owner, target, dt){
     d.slashT = (d.slashT || 0) + dt;
     while (d.slashT >= DOMAIN_SLASH_STEP){
       d.slashT -= DOMAIN_SLASH_STEP;
-      spawnDomainSlash(d.type, target.x, target.y);
+      spawnDomainSlash(d.type, target.x, target.y, owner);
     }
   }
 }
@@ -2887,7 +3237,7 @@ function applyDomainToSummons(owner, dt){
       d.slashT2 = (d.slashT2 || 0) + dt;
       while (d.slashT2 >= DOMAIN_SLASH_STEP){
         d.slashT2 -= DOMAIN_SLASH_STEP;
-        spawnDomainSlash(d.type, s.x, s.y);
+        spawnDomainSlash(d.type, s.x, s.y, owner);
       }
     }
   }
@@ -2901,6 +3251,7 @@ function checkDomainBreak(f){
     f.stun = 1.5;
     f.cd.domain = 25;
     f.clashDmg = 0;
+    playSfx('domainBreak', f.type, f === player ? 1 : 0.65);   /* ★ 领域破碎音效 */
     addEffect({ type:'text', x:f.x, y:f.y-90, t:0, life:2.0, text:name + ' · 破碎！', color:'#ff5555', size:22 });
     addEffect({ type:'ring', x:f.x, y:f.y, t:0, life:0.9, r0:20, r1:400, color:'#ff5555', width:9 });
     for (let k=0;k<26;k++){
@@ -3594,6 +3945,149 @@ function drawSummons(){
       drawSummonBar(s, R * 2.3 + 16, '#ffd76a');
 
       // 魔虚罗无时间限制，不绘制倒计时环
+      ctx.restore();
+    }
+    else if (s.type === 'chimera'){
+      /* ★ 嵌合兽：橙色巨躯（与魔虚罗同体积）+ 旋转尖刺光环 + 开合獠牙 */
+      const R = s.r;
+      const ph = s.chimeraPhase || 0;
+      const angle = finite(s.angle) ? s.angle : 0;
+      const bite = s.biteAnim > 0 ? clamp(s.biteAnim / 0.26, 0, 1) : 0;
+      ctx.save();
+      ctx.translate(s.x, s.y);
+
+      // 地面光影
+      ctx.beginPath();
+      ctx.arc(0, R * 0.85, R * 1.15, 0, TAU);
+      ctx.fillStyle = 'rgba(0,0,0,0.45)';
+      ctx.fill();
+
+      // 背部尖刺光环（头顶，反向旋转）
+      ctx.save();
+      ctx.translate(0, -R * 1.55);
+      ctx.rotate(-G.time * 1.35 + ph * 0.2);
+      ctx.strokeStyle = 'rgba(255,168,60,0.92)';
+      ctx.lineWidth = 3;
+      ctx.beginPath(); ctx.arc(0, 0, R * 0.86, 0, TAU); ctx.stroke();
+      ctx.fillStyle = 'rgba(255,170,60,0.95)';
+      for (let i = 0; i < 9; i++){
+        const a = i / 9 * TAU;
+        const len = R * (0.72 + 0.1 * Math.sin(ph * 5 + i));
+        ctx.save();
+        ctx.rotate(a);
+        ctx.beginPath();
+        ctx.moveTo(R * 0.78, -3.4);
+        ctx.lineTo(R * 0.78 + len * 0.34, 0);
+        ctx.lineTo(R * 0.78, 3.4);
+        ctx.closePath();
+        ctx.fill();
+        ctx.restore();
+      }
+      ctx.beginPath(); ctx.arc(0, 0, R * 0.18, 0, TAU);
+      ctx.fillStyle = 'rgba(255,222,150,0.95)';
+      ctx.fill();
+      ctx.restore();
+
+      // 本体：橙色球体
+      ctx.beginPath();
+      ctx.arc(0, 0, R, 0, TAU);
+      const g = ctx.createRadialGradient(-R*0.34, -R*0.36, 2, 0, 0, R);
+      g.addColorStop(0, '#ffd98a');
+      g.addColorStop(0.45, '#ff9a2e');
+      g.addColorStop(1, '#a8480a');
+      ctx.fillStyle = g;
+      ctx.fill();
+      ctx.strokeStyle = s.hitFlash > 0 ? '#ff6b6b' : 'rgba(255,190,90,0.9)';
+      ctx.lineWidth = 3;
+      ctx.stroke();
+
+      // 鬃毛纹路（缓慢自转）
+      ctx.save();
+      ctx.rotate(G.time * 0.6);
+      ctx.strokeStyle = 'rgba(120,52,6,0.45)';
+      ctx.lineWidth = 2;
+      for (let i = 0; i < 5; i++){
+        const a = i / 5 * TAU;
+        ctx.beginPath();
+        ctx.moveTo(Math.cos(a) * R * 0.28, Math.sin(a) * R * 0.28);
+        ctx.lineTo(Math.cos(a) * R * 0.92, Math.sin(a) * R * 0.92);
+        ctx.stroke();
+      }
+      ctx.restore();
+
+      // 兽面：朝向目标的獠牙 + 双眼
+      ctx.save();
+      ctx.rotate(angle);
+      // 上颚
+      ctx.strokeStyle = 'rgba(255,238,200,0.95)';
+      ctx.lineWidth = 2.2;
+      ctx.beginPath();
+      ctx.moveTo(R * 0.30, -R * 0.34);
+      ctx.lineTo(R * 0.98, -R * (0.20 + 0.10 * bite));
+      ctx.stroke();
+      // 下颚（撕咬时张开）
+      ctx.beginPath();
+      ctx.moveTo(R * 0.30,  R * 0.34);
+      ctx.lineTo(R * 0.98,  R * (0.20 + 0.26 * bite));
+      ctx.stroke();
+      // 獠牙
+      ctx.fillStyle = 'rgba(255,246,220,0.95)';
+      for (let i = 0; i < 4; i++){
+        const tx = R * (0.42 + i * 0.16);
+        const ty = -R * (0.30 - i * 0.015);
+        ctx.beginPath();
+        ctx.moveTo(tx, ty);
+        ctx.lineTo(tx + R * 0.07, ty - R * 0.10);
+        ctx.lineTo(tx + R * 0.15, ty - R * 0.01);
+        ctx.closePath();
+        ctx.fill();
+      }
+      // 双眼
+      const eyeGlow = 0.75 + 0.25 * Math.sin(ph * 6);
+      ctx.fillStyle = `rgba(255,240,190,${eyeGlow})`;
+      ctx.beginPath(); ctx.arc(R * 0.40, -R * 0.16, R * 0.13, 0, TAU); ctx.fill();
+      ctx.beginPath(); ctx.arc(R * 0.40,  R * 0.16, R * 0.13, 0, TAU); ctx.fill();
+      ctx.fillStyle = '#5a2400';
+      ctx.beginPath(); ctx.arc(R * 0.43, -R * 0.16, R * 0.055, 0, TAU); ctx.fill();
+      ctx.beginPath(); ctx.arc(R * 0.43,  R * 0.16, R * 0.055, 0, TAU); ctx.fill();
+      ctx.restore();
+
+      // 「嵌」字标记（随波动微微呼吸）
+      ctx.save();
+      ctx.font = '900 ' + Math.round(R * 0.5) + 'px system-ui,sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = `rgba(60,24,2,${0.55 + 0.2 * Math.sin(ph * 3)})`;
+      ctx.fillText('嵌', 0, 0);
+      ctx.restore();
+
+      // 撕咬动作：橙色弧光
+      if (s.biteAnim > 0){
+        const k = clamp(s.biteAnim / 0.26, 0, 1);
+        ctx.save();
+        ctx.rotate(angle);
+        ctx.strokeStyle = `rgba(255,180,70,${0.2 + k*0.75})`;
+        ctx.lineWidth = 3 + 6*k;
+        ctx.lineCap = 'round';
+        ctx.beginPath();
+        ctx.arc(0, 0, R * 1.45, -0.55, 0.55);
+        ctx.stroke();
+        ctx.lineCap = 'butt';
+        ctx.restore();
+      }
+
+      // ★ 血量条（置于光环之上）
+      drawSummonBar(s, R * 2.25 + 14, '#ff9a2e');
+
+      // 存续时间环
+      const ratio = clamp(s.life / s.maxLife, 0, 1);
+      if (ratio > 0 && ratio <= 1){
+        ctx.beginPath();
+        ctx.arc(0, 0, R + 6, -Math.PI/2, -Math.PI/2 + TAU * ratio);
+        ctx.strokeStyle = 'rgba(255,170,60,0.75)';
+        ctx.lineWidth = 2.5;
+        ctx.stroke();
+      }
       ctx.restore();
     }
   }
@@ -4578,7 +5072,7 @@ const CD_FIELD = {
   reverse:['reverse','reverseCd'], domain:['domain','domainCd'],
   fire:['fire','fireCd'], dismantle:['dismantle','dismantleCd'],
   nue:['nue','nueCd'], dog:['dog','dogCd'], tobi:['tobi','tobiCd'],
-  mahoraga:['maho','mahoCd'], space:['space','spaceCd'],
+  mahoraga:['maho','mahoCd'], chimera:['chimera','chimeraCd'], space:['space','spaceCd'],
   shinuchi:['shinuchi','shinuchiCd'], sentence:['sentence','sentenceCd'],
   heaven:['heaven','heavenCd'], chain:['chain','chainCd'], fly:['fly','flyCd'],
   simpledomain:['sd','sdCd'],
@@ -4698,14 +5192,31 @@ function updateButtons(){
     setCool('dog', p.cd.dog > 0, p.ce < c.dogCost);
     setCool('tobi', p.cd.tobi > 0, p.ce < c.tobiCost);
     setCool('mahoraga', p.cd.maho > 0, p.ce < c.mahoCost);
+    /* ★ 嵌合兽：场上已有己方嵌合兽时也无法召唤 → 一并置灰 */
+    const chimeraOnField = summons.some(sm => sm && sm.owner === p && sm.type === 'chimera' && sm.hp > 0);
+    setCool('chimera', p.cd.chimera > 0 || chimeraOnField, p.ce < c.chimeraCost);
     setCool('reverse', p.cd.reverse > 0 || p.hp >= p.maxHp, p.ce < c.reverseCost);
     setCool('domain', p.cd.domain > 0 || !!p.domain, p.ce < c.domainCost);
     /* ★ 空间斩：未解锁 / CD中 / 咒力不足 均置灰 */
     setCool('space', !p.spaceUnlocked || p.cd.space > 0, p.ce < c.spaceCost);
     if (btns.mahoraga)
       btns.mahoraga.classList.toggle('ready', p.cd.maho <= 0 && p.ce >= c.mahoCost);
+    if (btns.chimera)
+      btns.chimera.classList.toggle('ready',
+        p.cd.chimera <= 0 && !chimeraOnField && p.ce >= c.chimeraCost);
     if (btns.space)
       btns.space.classList.toggle('ready', p.spaceUnlocked && p.cd.space <= 0 && p.ce >= c.spaceCost);
+  }
+
+  /* ★ 领域展开期间：除普攻外全部置灰（放在最后，覆盖前面的各种状态） */
+  if (p.domain){
+    for (const s of (SKILL_SETS[p.type] || [])){
+      if (s.act === 'attack') continue;
+      const b = btns[s.act];
+      if (!b) continue;
+      b.classList.add('cool');
+      b.classList.remove('ready');
+    }
   }
 }
 
@@ -4724,9 +5235,16 @@ function loop(now){
 }
 
 loadSubtitles();
-/* ★ 首次交互时尝试锁定横屏（手机端） */
-window.addEventListener('pointerdown', tryLockLandscape, { once: true });
+/* ★ 首次交互时尝试锁定横屏（手机端）+ 解锁音效 */
+window.addEventListener('pointerdown', () => { tryLockLandscape(); unlockSfx(); }, { once: true });
 window.addEventListener('touchstart', tryLockLandscape, { once: true });
+/* ★ 音效开关按钮 */
+{
+  const mb = document.getElementById('muteBtn');
+  if (mb) mb.addEventListener('click', e => { e.stopPropagation(); toggleMute(); });
+}
+preloadSfx();
+updateMuteBtn();
 showMenu();
 requestAnimationFrame(loop);
 
