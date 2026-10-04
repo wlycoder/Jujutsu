@@ -1218,6 +1218,38 @@ const endJoy = e => {
 canvas.addEventListener('pointerup', endJoy);
 canvas.addEventListener('pointercancel', endJoy);
 
+/* ══════════════════════════════════════════
+   ★ 移动端防误放大
+   —— iOS / iPadOS 的 Safari 系内核（含 Edge）从 iOS 10 起会忽略
+      viewport 里的 user-scalable=no，双指捏合依旧能缩放页面。
+   —— 因此这里再补三道保险：
+      ① CSS：html,body 的 touch-action 设为「仅平移」，从布局层面
+         禁掉双指缩放与双击放大（已写在 styles.css）；
+      ② WebKit 专有的 gesture 事件：直接 preventDefault；
+      ③ 任意「双指移动」与画面上的「快速双击」：拦截默认行为。
+   注意：画面上的双击拦截只针对 #game，技能按钮靠 pointerdown 触发，
+        连点不受影响。 */
+(function blockZoom(){
+  const stop = e => { if (e && e.cancelable) e.preventDefault(); };
+
+  /* ② WebKit 专有：双指缩放手势（Safari / iPad Edge） */
+  for (const ev of ['gesturestart', 'gesturechange', 'gestureend'])
+    document.addEventListener(ev, stop, { passive: false });
+
+  /* ③ 双指移动（可能是捏合缩放）→ 一律拦截；单指不动，保证正常滚动 */
+  document.addEventListener('touchmove', e => {
+    if (e.touches && e.touches.length > 1) stop(e);
+  }, { passive: false });
+
+  /* ③ 画布上的快速双击 = 双击放大 → 拦掉第二次的默认行为 */
+  let lastTap = 0;
+  canvas.addEventListener('touchend', e => {
+    const now = Date.now();
+    if (now - lastTap <= 320) stop(e);
+    lastTap = now;
+  }, { passive: false });
+})();
+
 let tipsHidden = false;
 function hideTips(){
   if (tipsHidden) return;

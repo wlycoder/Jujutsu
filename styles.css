@@ -24,10 +24,17 @@ input,textarea{-webkit-user-select:text;user-select:text;}
 }
 
 html,body{width:100%;height:100%;overflow:hidden;background:var(--bg-0);
-  font-family:system-ui,-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;color:var(--text);}
+  font-family:system-ui,-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;color:var(--text);
+  /* ★ 移动端防误放大：只允许平移（禁止双指缩放 / 双击放大），
+     并关掉橡皮筋与下拉刷新（iPad Edge 下 meta 的 user-scalable=no 会被忽略） */
+  touch-action:pan-x pan-y;-webkit-text-size-adjust:100%;text-size-adjust:100%;
+  overscroll-behavior:none;position:relative;}
 
 /* ★ 舞台：手机竖屏时整体旋转 90° 绘制，保证游戏始终是横屏
-   （尺寸与 transform 由 resize() 按实际视口写入） */
+   （尺寸与 transform 由 resize() 按实际视口写入）
+   ⚠️ 这里不能用 touch-action:none —— 它会把子元素的平移手势一并锁死，
+      导致 #selectScreen / #menu 在矮屏（iPad 横屏）下无法滚动。
+      游戏层的手势禁用交给 #game / #hud / #controls 各自承担。 */
 #stage{position:absolute;top:0;left:0;width:100%;height:100%;
   transform-origin:0 0;overflow:hidden;}
 #game{display:block;position:absolute;inset:0;touch-action:none;}
@@ -39,7 +46,7 @@ html,body{width:100%;height:100%;overflow:hidden;background:var(--bg-0);
   padding:14px 22px;border-radius:16px;
   border:1px solid var(--line-2);background:rgba(20,22,26,.92);
   box-shadow:0 10px 34px rgba(0,0,0,.55);
-  backdrop-filter:blur(6px);pointer-events:none;
+  backdrop-filter:blur(6px);pointer-events:none;touch-action:none;
   animation:rtIn .35s ease-out;}
 #rotateTip.hidden{display:none;}
 .rt-phone{width:26px;height:44px;border-radius:6px;border:2px solid #cfd8e2;
@@ -55,12 +62,12 @@ html,body{width:100%;height:100%;overflow:hidden;background:var(--bg-0);
 
 /* HUD */
 #hud{position:absolute;top:0;left:0;right:0;display:flex;justify-content:space-between;
-  align-items:flex-start;padding:8px 10px;gap:8px;pointer-events:none;z-index:5;}
+  align-items:flex-start;padding:8px 10px;gap:8px;pointer-events:none;z-index:5;touch-action:none;}
 /* ★ 音效开关 */
 #muteBtn{pointer-events:auto;flex:0 0 auto;width:30px;height:30px;border-radius:50%;
   display:flex;align-items:center;justify-content:center;font-size:14px;line-height:1;
   border:1px solid var(--line-2);background:rgba(28,32,37,.82);color:var(--text-dim);
-  cursor:pointer;margin-top:1px;touch-action:manipulation;
+  cursor:pointer;margin-top:1px;touch-action:none;
   transition:transform .1s,border-color .2s,background .2s,color .2s;}
 #muteBtn:hover{border-color:var(--line-3);color:var(--text);}
 #muteBtn:active{transform:scale(.9);}
@@ -83,7 +90,7 @@ html,body{width:100%;height:100%;overflow:hidden;background:var(--bg-0);
 .ce2 .fill{background:linear-gradient(90deg,#8a1a2b,#ff4d4d);}
 
 /* 控制按钮：右下角弧形操作区（内外两圈圆弧，位置由 JS 计算） */
-#controls{position:absolute;z-index:10;pointer-events:none;
+#controls{position:absolute;z-index:10;pointer-events:none;touch-action:none;
   right:max(10px,env(safe-area-inset-right));
   bottom:max(12px,env(safe-area-inset-bottom));}
 .skill{pointer-events:auto;position:absolute;
@@ -93,7 +100,7 @@ html,body{width:100%;height:100%;overflow:hidden;background:var(--bg-0);
   display:flex;align-items:center;justify-content:center;flex-direction:column;
   box-shadow:0 0 12px rgba(0,0,0,.45),inset 0 0 12px rgba(206,214,224,.10);
   transition:transform .08s,box-shadow .15s,opacity .15s;cursor:pointer;
-  touch-action:manipulation;-webkit-tap-highlight-color:transparent;}
+  touch-action:none;-webkit-tap-highlight-color:transparent;}
 .skill:active{transform:scale(.9);}
 .skill .sub{font-size:8px;opacity:.6;font-weight:500;margin-top:1px;}
 /* ★ 咒力消耗提示 */
