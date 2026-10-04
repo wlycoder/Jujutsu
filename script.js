@@ -104,6 +104,8 @@ const CFG = {
     domainMaxR: 365, domainDuration: 5.2, domainDps: 0,
     brainBreakCost: 0.18, brainBreakStun: 0.45,
     brainBleed: 0.06, brainBreakMinHp: 0.28,
+    /* ★ 简易领域（五条悟名）：身下生成跟随移动的绿色圆环，6 秒内免疫敌方领域 */
+    sdCost: 25, sdCd: 18, sdDuration: 6, sdR: 118,
   },
   sukuna: {
     name: '两面宿傩',
@@ -118,6 +120,8 @@ const CFG = {
     domainName: '伏魔御厨子',
     domainBaseR: 390, domainOpenTime: 0.5, domainGrowRate: 78,
     domainMaxR: 1600, domainDuration: 8.5, domainDps: 34,
+    /* ★ 弥虚葛笼：身下生成跟随移动的绿色圆环，6 秒内免疫敌方领域 */
+    sdCost: 25, sdCd: 18, sdDuration: 6, sdR: 120,
   },
   /* ★ 十影宿傩 —— 伏魔御厨子（削弱版） */
   sukunaTs: {
@@ -141,6 +145,8 @@ const CFG = {
     domainName: '伏魔御厨子',
     domainBaseR: 320, domainOpenTime: 0.55, domainGrowRate: 40,
     domainMaxR: 900, domainDuration: 7.0, domainDps: 22,
+    /* ★ 弥虚葛笼：身下生成跟随移动的绿色圆环，6 秒内免疫敌方领域 */
+    sdCost: 25, sdCd: 18, sdDuration: 6, sdR: 120,
   },
   /* ★ 日车宽见 —— 审判控制型：领域内禁用敌方一切主动术式 */
   higuruma: {
@@ -284,7 +290,7 @@ function createFighter(type, x, y){
     blueCharge: 0,                 /* ★ 长按苍的蓄力计时 */
     blueSlow: 0, blueSlowMul: 1,   /* ★ 被吸附型苍减速的剩余时间 / 倍率 */
     brainDamaged: false,
-    cd: { blue:0, red:0, purple:0, domain:0, reverse:0, fire:0, dismantle:0, nue:0, dog:0, maho:0, tobi:0, space:0, shinuchi:0, sentence:0, heaven:0, chain:0, fly:0 },
+    cd: { blue:0, red:0, purple:0, domain:0, reverse:0, fire:0, dismantle:0, nue:0, dog:0, maho:0, tobi:0, space:0, shinuchi:0, sentence:0, heaven:0, chain:0, fly:0, sd:0 },
     domainLock: 0,
     skillLock: 0,   /* 审判：术式禁用剩余时间 */
     sentence: 0,    /* 死刑：受到伤害提升剩余时间 */
@@ -293,6 +299,7 @@ function createFighter(type, x, y){
     mahoSummoned: false,   // 是否召唤过魔虚罗
     mahoDied: false,       // 召唤的魔虚罗是否已陨落
     spaceUnlocked: false,  // 空间斩是否解锁
+    sd: null,              // ★ 简易领域 / 弥虚葛笼 { t, dur, r }
   };
 }
 
@@ -549,32 +556,35 @@ function updateHUDElements(){
    ══════════════════════════════════════════ */
 const SKILL_SETS = {
   gojo: [
-    { act:'domain',     label:'领域',      sub:'SPACE', cls:'gold' },
-    { act:'infinity',   label:'无下限',    sub:'F' },
-    { act:'bluefist',   label:'苍拳',      sub:'G' },
-    { act:'reverse',    label:'反转术式',  sub:'H', cls:'green' },
-    { act:'blue',       label:'苍',        sub:'Q' },
-    { act:'red',        label:'赫',        sub:'E', cls:'red' },
-    { act:'purple',     label:'茈',        sub:'R', cls:'purple' },
-    { act:'brainbreak', label:'破脑',      sub:'P', cls:'red' },
-    { act:'attack',     label:'普通攻击',  sub:'J', cls:'attackbtn' },
+    { act:'domain',       label:'领域',      sub:'SPACE', cls:'gold' },
+    { act:'infinity',     label:'无下限',    sub:'F' },
+    { act:'bluefist',     label:'苍拳',      sub:'G' },
+    { act:'reverse',      label:'反转术式',  sub:'H', cls:'green' },
+    { act:'simpledomain', label:'简易领域',  sub:'C', cls:'simpledomain' },
+    { act:'blue',         label:'苍',        sub:'Q' },
+    { act:'red',          label:'赫',        sub:'E', cls:'red' },
+    { act:'purple',       label:'茈',        sub:'R', cls:'purple' },
+    { act:'brainbreak',   label:'破脑',      sub:'P', cls:'red' },
+    { act:'attack',       label:'普通攻击',  sub:'J', cls:'attackbtn' },
   ],
   sukuna: [
-    { act:'domain',    label:'领域',      sub:'SPACE', cls:'gold' },
-    { act:'reverse',   label:'反转术式',  sub:'H', cls:'green' },
-    { act:'fire',      label:'开',        sub:'E', cls:'red' },
-    { act:'dismantle', label:'解',        sub:'Q', cls:'purple' },
-    { act:'attack',    label:'斩击',      sub:'J', cls:'attackbtn' },
+    { act:'domain',       label:'领域',      sub:'SPACE', cls:'gold' },
+    { act:'reverse',      label:'反转术式',  sub:'H', cls:'green' },
+    { act:'simpledomain', label:'弥虚葛笼',  sub:'C', cls:'simpledomain' },
+    { act:'fire',         label:'开',        sub:'E', cls:'red' },
+    { act:'dismantle',    label:'解',        sub:'Q', cls:'purple' },
+    { act:'attack',       label:'斩击',      sub:'J', cls:'attackbtn' },
   ],
   sukunaTs: [
-    { act:'domain',   label:'领域',      sub:'SPACE', cls:'gold' },
-    { act:'space',    label:'空间斩',    sub:'F', cls:'space' },
-    { act:'reverse',  label:'反转术式',  sub:'H', cls:'green' },
-    { act:'nue',      label:'鵺',        sub:'Q', cls:'purple' },
-    { act:'dog',      label:'玉犬',      sub:'E', cls:'red' },
-    { act:'tobi',     label:'脱兔',      sub:'T', cls:'tobi' },
-    { act:'mahoraga', label:'魔虚罗',    sub:'R', cls:'shadow' },
-    { act:'attack',   label:'斩击',      sub:'J', cls:'attackbtn' },
+    { act:'domain',       label:'领域',      sub:'SPACE', cls:'gold' },
+    { act:'space',        label:'空间斩',    sub:'F', cls:'space' },
+    { act:'reverse',      label:'反转术式',  sub:'H', cls:'green' },
+    { act:'simpledomain', label:'弥虚葛笼',  sub:'C', cls:'simpledomain' },
+    { act:'nue',          label:'鵺',        sub:'Q', cls:'purple' },
+    { act:'dog',          label:'玉犬',      sub:'E', cls:'red' },
+    { act:'tobi',         label:'脱兔',      sub:'T', cls:'tobi' },
+    { act:'mahoraga',     label:'魔虚罗',    sub:'R', cls:'shadow' },
+    { act:'attack',       label:'斩击',      sub:'J', cls:'attackbtn' },
   ],
   higuruma: [
     { act:'domain',   label:'诛伏赐死',  sub:'SPACE', cls:'gold' },
@@ -604,6 +614,7 @@ const CHAR_INFO = {
       ['苍', 'Q · 引力球，吸附并拉扯敌人；长按 → 吸附型：滞空、把敌人拉向球心并减速'],
       ['赫', 'E · 斥力球，命中强力击退；场上若有吸附型苍，则被其牵引'],
       ['茈', 'R · 需先释放 苍+赫，贯穿大伤害；赫 撞上吸附型苍 → 范围 480 紫色冲击波「茈」'],
+      ['简易领域', 'C · 脚下展开绿色圆环（跟随移动 6 秒）：其间敌方领域对你完全无效'],
       ['无量空处', '空格 · 领域，僵直敌方并封印领域 20 秒'],
       ['反转术式', 'H · 回复生命 / 修复受损大脑'],
       ['破脑', 'P · 自伤以重置领域冷却'],
@@ -617,6 +628,7 @@ const CHAR_INFO = {
       ['解', 'Q · 高速大范围斩击，可贯穿'],
       ['开', 'E · 火焰弹'],
       ['伏魔御厨子', '空格 · 领域，持续灼烧且不断扩张'],
+      ['弥虚葛笼', 'C · 脚下展开绿色圆环（跟随移动 6 秒）：其间敌方领域对你完全无效'],
       ['反转术式', 'H · 回复生命'],
     ],
   },
@@ -629,6 +641,7 @@ const CHAR_INFO = {
       ['玉犬', 'E · 召唤 2 只玉犬（各 120 HP）'],
       ['魔虚罗', 'R · 白球+法轮，会适应减伤；场上限 1 只'],
       ['空间斩', 'F · 魔虚罗陨落后解锁，命中即巨额伤害'],
+      ['弥虚葛笼', 'C · 脚下展开绿色圆环（跟随移动 6 秒）：其间敌方领域对你完全无效（含己方式神）'],
       ['伏魔御厨子', '空格 · 领域（削弱版）'],
       ['反转术式', 'H · 回复生命'],
     ],
@@ -688,7 +701,7 @@ const SKILL_PRIORITY = {
   domain:1, infinity:1, brainbreak:1, bluefist:1,
   dog:2, tobi:2, mahoraga:2, fly:2,
   reverse:3, blue:3, red:3, purple:3, fire:3, dismantle:3,
-  space:3, nue:3, shinuchi:3, sentence:3, heaven:3, chain:3,
+  space:3, nue:3, shinuchi:3, sentence:3, heaven:3, chain:3, simpledomain:3,
   attack:9,
 };
 const skillPriority = s => (SKILL_PRIORITY[s.act] !== undefined ? SKILL_PRIORITY[s.act] : 2);
@@ -700,7 +713,7 @@ const COST_FIELD = {
   fire:'fireCost', dismantle:'dismantleCost',
   nue:'nueCost', dog:'dogCost', tobi:'tobiCost', mahoraga:'mahoCost', space:'spaceCost',
   shinuchi:'shinuchiCost', sentence:'sentenceCost',
-  heaven:'heavenCost', chain:'chainCost', fly:'flyCost',
+  heaven:'heavenCost', chain:'chainCost', fly:'flyCost', simpledomain:'sdCost',
 };
 function skillCost(act, type){
   const cfg = CFG[type];
@@ -716,8 +729,9 @@ function skillCost(act, type){
    —— 数值越大越靠近圆心（内侧），即越常用的技能越好按
    ══════════════════════════════════════════ */
 const ARC_PER_RING = 4;      /* 每圈最多容纳的按钮数 */
-const ARC_START = 184;       /* 起始角度（屏幕角度：180 = 正左） */
-const ARC_END   = 266;       /* 结束角度（270 = 正上） */
+const ARC_GAP = 9;           /* 相邻按钮之间保留的最小空隙（px） */
+const ARC_START = 180;       /* 起始角度（屏幕角度：180 = 正左） */
+const ARC_END   = 270;       /* 结束角度（270 = 正上） */
 
 function makeSkillBtn(s){
   const btn = document.createElement('button');
@@ -780,10 +794,30 @@ function renderControls(){
   const atkBtnCfg = list.find(s => s.act === 'attack');
   const ring = list.filter(s => s.act !== 'attack');
 
-  /* 按钮直径与圆弧半径随视口自适应 */
-  const bs = Math.round(clamp(Math.min(W, H) * 0.115, 40, 62));
-  const rIn = bs * 1.95, rOut = bs * 3.05;
-  const box = Math.round(rOut + bs * 0.5);
+  /* ── 每圈按钮数：外圈优先排满 4 个，再排下一圈 ── */
+  const ringCounts = [];
+  for (let i = 0; i < ring.length; i += ARC_PER_RING)
+    ringCounts.push(Math.min(ARC_PER_RING, ring.length - i));
+  if (!ringCounts.length) ringCounts.push(0);
+  const rings = ringCounts.length;
+
+  /* 按钮直径：随视口自适应；需要 3 圈时整体收一档，避免操作区过大 */
+  const sizeMul = rings >= 3 ? 0.88 : 1;
+  const bs = Math.max(36, Math.round(clamp(Math.min(W, H) * 0.105, 38, 54) * sizeMul));
+  const pitch = bs + ARC_GAP;                 /* 相邻按钮圆心距下限 */
+  const spanRad = (ARC_END - ARC_START) * Math.PI / 180;
+
+  /* 满足「同一圈内相邻按钮不挨太近」所需的最小半径 */
+  let rIn = 0;
+  for (const m of ringCounts)
+    if (m > 1) rIn = Math.max(rIn, pitch / (2 * Math.sin(spanRad / (2*m))));
+  /* 同时不能压到圆心的普攻键上 */
+  rIn = Math.max(rIn, bs * 1.98 + ARC_GAP);
+  rIn = Math.round(rIn);
+
+  /* 第 0 圈在最外，往内每圈缩一个 pitch */
+  const radii = ringCounts.map((_, k) => rIn + (rings - 1 - k) * pitch);
+  const box = Math.round(radii[0] + bs * 0.5);
   ctrlEl.style.width  = box + 'px';
   ctrlEl.style.height = box + 'px';
 
@@ -798,17 +832,19 @@ function renderControls(){
     btns[btn.dataset.act] = btn;
   };
 
-  /* ① 先排外圈（最多 4 个），排满后再排内圈 */
-  const step = (ARC_END - ARC_START) / ARC_PER_RING;
-  const maxOnRings = ARC_PER_RING * 2;
-  for (let i = 0; i < ring.length && i < maxOnRings; i++){
-    const s = ring[i];
-    const outer = i < ARC_PER_RING;
-    const k = outer ? i : i - ARC_PER_RING;
-    const r = outer ? rOut : rIn;
-    const deg = ARC_START + (k + 0.5) * step;
-    const rad = deg * Math.PI / 180;
-    put(makeSkillBtn(s), cx + Math.cos(rad)*r, cy + Math.sin(rad)*r, bs);
+  /* ① 从外圈往内圈依次排布（外圈排满 4 个才开始排内圈） */
+  let idx = 0;
+  for (let k = 0; k < rings; k++){
+    const m = ringCounts[k];
+    if (!m) break;
+    const r = radii[k];
+    for (let j = 0; j < m; j++, idx++){
+      const s = ring[idx];
+      if (!s) break;
+      const deg = ARC_START + (j + 0.5) * (ARC_END - ARC_START) / m;
+      const rad = deg * Math.PI / 180;
+      put(makeSkillBtn(s), cx + Math.cos(rad)*r, cy + Math.sin(rad)*r, bs);
+    }
   }
 
   /* ② 普攻：圆弧圆心，比技能键更大 */
@@ -847,6 +883,7 @@ function handleAction(act){
     case 'heaven':     tojiHeavenSpear(player, enemy); break;
     case 'chain':      tojiChain(player, enemy); break;
     case 'fly':        tojiFlyHead(player); break;
+    case 'simpledomain': castSimpleDomain(player); break;
   }
 }
 
@@ -1911,6 +1948,7 @@ function updatePlayer(dt){
   if (p.attackCd > 0) p.attackCd -= dt;
 
   tickBrainBleed(p, dt);
+  tickSimpleDomain(p, dt);
   if (!p.alive) return;
 
   let mx = 0, my = 0;
@@ -1970,6 +2008,7 @@ function updateAI(dt){
   ai.ce = Math.min(ai.maxCe, ai.ce + c.ceRegen*dt);
 
   tickBrainBleed(ai, dt);
+  tickSimpleDomain(ai, dt);
   if (!ai.alive) return;
 
   if (Math.abs(ai.kbx) > 1 || Math.abs(ai.kby) > 1){
@@ -2001,7 +2040,12 @@ function updateAI(dt){
     const lowHp = hasReverse(ai.type) && ai.hp < ai.maxHp * c.reverseThreshold;
     if ((ai.brainDamaged || lowHp) && ai.cd.reverse <= 0 && ai.ce >= c.reverseCost) castReverse(ai);
 
-    /* ② 玩家展开领域 → 立刻同步展开对冲 */
+    /* ② 玩家展开领域 → 先看能否用简易领域/弥虚葛笼硬顶，否则同步展开对冲 */
+    if (player.domain && !protectedBySimpleDomain(ai) && finite(c.sdCost) &&
+        ai.cd.sd <= 0 && !ai.sd && ai.ce >= c.sdCost &&
+        dist(ai, player.domain) < player.domain.r + 40){
+      castSimpleDomain(ai);      /* ★ 站在敌方领域里：以简易领域无效化 */
+    }
     if (c.domainName && player.domain && !enemy.domain && enemy.domainLock <= 0 && enemy.ce >= c.domainCost && !enemy.brainDamaged){
       enemy.cd.domain = 0;
       castDomain(enemy, player);
@@ -2665,6 +2709,8 @@ function applyDomainEffect(owner, target, dt){
   /* ★ 天与咒缚：伏黑甚尔没有咒力，领域「选不中」他 */
   const tc = CFG[target.type];
   if (tc && tc.heavenImmuneDomain) return;
+  /* ★ 简易领域 / 弥虚葛笼：开启期间敌方领域对其完全无效 */
+  if (protectedBySimpleDomain(target)) return;
   const inThis = dist(target, d) < d.r;
   const inOwn = target.domain && dist(target, target.domain) < target.domain.r;
   if (!inThis || inOwn) return;
@@ -2708,7 +2754,66 @@ function applyDomainEffect(owner, target, dt){
   }
 }
 
-/* 领域对式神生效：魔虚罗可受攻击/效果影响，并产生适应 */
+/* ══════════════════════════════════════════
+   ★ 简易领域 / 弥虚葛笼
+   身下生成一个跟随自身移动的绿色半透明圆环；
+   圆环存在期间，敌方领域对内无效；6 秒后闪烁消失
+   ══════════════════════════════════════════ */
+function sdName(type){
+  return type === 'gojo' ? '简易领域' : '弥虚葛笼';
+}
+/* 该角色是否正被自己的简易领域保护 */
+function protectedBySimpleDomain(f){
+  return !!(f && f.sd && f.sd.t < f.sd.dur && f.alive);
+}
+
+function castSimpleDomain(f){
+  if (!f || !f.alive || f.stun > 0) return;
+  const c = CFG[f.type];
+  if (!finite(c.sdCost) || !finite(c.sdDuration)) return;   /* 该角色没有此技能 */
+  if (f.skillLock > 0 || f.cd.sd > 0 || f.ce < c.sdCost) return;
+  f.ce -= c.sdCost;
+  f.cd.sd = c.sdCd;
+  f.sd = { t: 0, dur: c.sdDuration, r: c.sdR };
+  const name = sdName(f.type);
+  addEffect({ type:'text', x:f.x, y:f.y-78, t:0, life:1.5, text:name, color:'#7dffb8', size:20 });
+  addEffect({ type:'ring', x:f.x, y:f.y, t:0, life:0.6, r0:12, r1:c.sdR*1.25, color:'#5cf0a0', width:6 });
+  for (let i=0;i<14;i++){
+    const a = rnd(0, TAU);
+    addEffect({ type:'spark', x:f.x + Math.cos(a)*c.sdR, y:f.y + Math.sin(a)*c.sdR,
+      t:0, life:rnd(.3,.6), vx:-Math.cos(a)*rnd(40,110), vy:-Math.sin(a)*rnd(40,110),
+      color:'#8dffc4', size:3 });
+  }
+}
+
+/* 每帧推进简易领域计时；到期后进入 0.6 秒闪烁，再消失 */
+function tickSimpleDomain(f, dt){
+  if (!f || !f.sd) return;
+  const sd = f.sd;
+  sd.t += dt;
+  if (sd.t >= sd.dur + 0.6){
+    f.sd = null;
+    addEffect({ type:'ring', x:f.x, y:f.y, t:0, life:0.45, r0:sd.r*0.9, r1:sd.r*0.4,
+      color:'#5cf0a0', width:4 });
+    return;
+  }
+  if (sd.t >= sd.dur && !sd.warned){
+    sd.warned = true;
+    addEffect({ type:'text', x:f.x, y:f.y-74, t:0, life:0.6,
+      text: sdName(f.type) + ' · 即将消散', color:'#a8ffd2', size:13 });
+  }
+}
+
+/* 该式神是否受到主人的简易领域保护 */
+function summonProtected(s){
+  const o = s && s.owner;
+  if (!protectedBySimpleDomain(o)) return false;
+  return dist(s, o) <= o.sd.r;
+}
+
+/* ══════════════════════════════════════════
+   领域对式神生效：魔虚罗可受攻击/效果影响，并产生适应
+   ══════════════════════════════════════════ */
 function applyDomainToSummons(owner, dt){
   if (!owner || !owner.domain) return;
   const d = owner.domain;
@@ -2717,6 +2822,8 @@ function applyDomainToSummons(owner, dt){
   for (const s of summons){
     if (!s || s.owner === owner) continue;           // 只影响敌方式神
     if (!finite(s.x) || !finite(s.y) || s.hp <= 0) continue;
+    /* ★ 站在主人简易领域范围内的式神同样受保护 */
+    if (summonProtected(s)) continue;
     const inThis = dist(s, d) < d.r;
     const inOwn = s.owner.domain && dist(s, s.owner.domain) < s.owner.domain.r;
     if (!inThis || inOwn) continue;
@@ -2791,6 +2898,8 @@ function render(){
   if (player.domain) drawDomain(player.domain);
   if (enemy.domain) drawDomain(enemy.domain);
   drawOverlapZone();
+  drawSimpleDomain(player);      /* ★ 简易领域 / 弥虚葛笼：画在角色脚下 */
+  drawSimpleDomain(enemy);
   drawSummons();
   drawProjectiles();
   if (enemy.alive) drawFighter(enemy);
@@ -3105,6 +3214,77 @@ function drawOverlapZone(){
 }
 
 /* ★ 式神绘制 —— 极简、安全，无 shadowBlur、无 ellipse */
+/* ══════════════════════════════════════════
+   ★ 简易领域 / 弥虚葛笼 渲染
+   角色脚下的绿色半透明圆环；到期前 0.6 秒开始闪烁
+   ══════════════════════════════════════════ */
+function drawSimpleDomain(f){
+  if (!f || !f.alive || !f.sd) return;
+  const sd = f.sd;
+  const over = sd.t >= sd.dur;
+  let a = 1;
+  if (over){
+    a = 0.45 + 0.55 * Math.sin(sd.t * 40);      /* 闪烁 */
+    if (a <= 0.06) return;
+  }
+  const R = sd.r;
+
+  ctx.save();
+  ctx.translate(f.x, f.y);
+
+  /* 地面光晕（半透明绿） */
+  const g = ctx.createRadialGradient(0, 0, R*0.12, 0, 0, R);
+  g.addColorStop(0,    `rgba(110,255,180,${0.26*a})`);
+  g.addColorStop(0.62, `rgba(60,225,145,${0.17*a})`);
+  g.addColorStop(1,    'rgba(35,190,115,0)');
+  ctx.beginPath(); ctx.arc(0, 0, R, 0, TAU);
+  ctx.fillStyle = g; ctx.fill();
+
+  /* 外圈 */
+  ctx.beginPath(); ctx.arc(0, 0, R, 0, TAU);
+  ctx.strokeStyle = `rgba(130,255,195,${0.8*a})`;
+  ctx.lineWidth = 3;
+  ctx.stroke();
+
+  /* 内圈虚线（缓慢反向旋转） */
+  ctx.save();
+  ctx.rotate(-G.time * 0.5);
+  ctx.setLineDash([14, 11]);
+  ctx.beginPath(); ctx.arc(0, 0, R*0.8, 0, TAU);
+  ctx.strokeStyle = `rgba(150,255,205,${0.5*a})`;
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.restore();
+
+  /* 内圈刻度（随角色朝向之外的独立旋转） */
+  ctx.save();
+  ctx.rotate(G.time * 0.85);
+  ctx.strokeStyle = `rgba(170,255,215,${0.45*a})`;
+  ctx.lineWidth = 2;
+  for (let i = 0; i < 8; i++){
+    const ang = i * (TAU/8);
+    ctx.beginPath();
+    ctx.moveTo(Math.cos(ang)*R*0.88, Math.sin(ang)*R*0.88);
+    ctx.lineTo(Math.cos(ang)*R*0.97, Math.sin(ang)*R*0.97);
+    ctx.stroke();
+  }
+  ctx.restore();
+
+  /* 中心符纹：简易领域 / 弥虚葛笼 */
+  const glyph = f.type === 'gojo' ? '简' : '笼';
+  ctx.save();
+  ctx.globalAlpha = 0.5 * a;
+  ctx.fillStyle = '#9dffcb';
+  ctx.font = '700 30px system-ui,sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(glyph, 0, 14);
+  ctx.restore();
+
+  ctx.restore();
+}
+
 function drawSummons(){
   for (const s of summons){
     if (!s || !finite(s.x) || !finite(s.y)) continue;
@@ -4361,6 +4541,7 @@ const CD_FIELD = {
   mahoraga:['maho','mahoCd'], space:['space','spaceCd'],
   shinuchi:['shinuchi','shinuchiCd'], sentence:['sentence','sentenceCd'],
   heaven:['heaven','heavenCd'], chain:['chain','chainCd'], fly:['fly','flyCd'],
+  simpledomain:['sd','sdCd'],
 };
 
 /* ★ 按键 CD 动画：扇形遮罩按剩余比例回填 + 居中倒计时数字
@@ -4415,6 +4596,14 @@ function updateButtons(){
     if (!b) return;
     b.classList.toggle('cool', cool || !!extra);
   };
+
+  /* ★ 简易领域 / 弥虚葛笼：冷却中 / 已展开 / 咒力不足 / 术式被禁 → 置灰 */
+  if (btns.simpledomain && finite(CFG[p.type].sdCost)){
+    const c = CFG[p.type];
+    setCool('simpledomain', p.cd.sd > 0 || !!p.sd || p.skillLock > 0, p.ce < c.sdCost);
+    btns.simpledomain.classList.toggle('ready',
+      p.cd.sd <= 0 && !p.sd && p.skillLock <= 0 && p.ce >= c.sdCost);
+  }
 
   if (p.type === 'gojo'){
     const c = CFG.gojo;
