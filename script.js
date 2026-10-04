@@ -3,8 +3,21 @@
 
 const canvas = document.getElementById('game');
 const ctx = canvas.getContext('2d');
+const stageEl = document.getElementById('stage');
+const rotateTipEl = document.getElementById('rotateTip');
+
+/* ★ 操作端检测：粗指针 / 触摸屏 + 移动端 UA
+   （调试用：?mobile 强制手机模式，?desktop 强制电脑模式） */
+const IS_TOUCH = (navigator.maxTouchPoints || 0) > 0 || 'ontouchstart' in window ||
+  !!(window.matchMedia && window.matchMedia('(pointer: coarse)').matches);
+const FORCE_MOBILE = /[?&]mobile/i.test(location.search);
+const FORCE_DESKTOP = /[?&]desktop/i.test(location.search);
+const IS_MOBILE = !FORCE_DESKTOP && (FORCE_MOBILE || (IS_TOUCH &&
+  (/Android|iPhone|iPad|iPod|Windows Phone|Mobile/i.test(navigator.userAgent) ||
+   Math.min(window.innerWidth, window.innerHeight) < 560)));
 
 let W = 0, H = 0, DPR = 1, scale = 1, baseScale = 1;
+let rotated = false;             /* ★ 手机竖屏 → 舞台旋转 90° 按横屏绘制 */
 const WORLD = { w: 1700, h: 1150 };
 const clamp = (v,a,b) => v < a ? a : (v > b ? b : v);
 const rnd = (a,b) => a + Math.random()*(b-a);
@@ -14,13 +27,47 @@ const finite = v => typeof v === 'number' && isFinite(v);
 
 function resize(){
   DPR = Math.min(window.devicePixelRatio || 1, 2);
-  W = window.innerWidth; H = window.innerHeight;
+  const vw = window.innerWidth, vh = window.innerHeight;
+
+  /* ★ 手机端竖屏：把整个舞台旋转 90°，游戏始终以横屏（长边为宽）绘制 */
+  rotated = IS_MOBILE && vh > vw;
+  if (rotated){
+    W = vh; H = vw;                       /* 逻辑视口 = 横屏尺寸 */
+    stageEl.style.width  = W + 'px';
+    stageEl.style.height = H + 'px';
+    stageEl.style.transformOrigin = '0 0';
+    stageEl.style.transform = `translateY(${W}px) rotate(-90deg)`;
+  } else {
+    W = vw; H = vh;
+    stageEl.style.width  = '100%';
+    stageEl.style.height = '100%';
+    stageEl.style.transform = '';
+  }
+
   canvas.width = Math.floor(W*DPR);
   canvas.height = Math.floor(H*DPR);
   canvas.style.width = W+'px';
   canvas.style.height = H+'px';
   baseScale = clamp(Math.min(W/700, H/760), 0.34, 1.35);
   scale = baseScale;
+  updateRotateTip();
+}
+
+/* ★ 竖屏提醒（仅手机端竖屏时显示，不随舞台旋转） */
+function updateRotateTip(){
+  if (!rotateTipEl) return;
+  rotateTipEl.classList.toggle('hidden', !rotated);
+}
+
+/* ★ 尝试锁定横屏（部分浏览器需全屏才允许，失败则忽略） */
+let orientationTried = false;
+function tryLockLandscape(){
+  if (!IS_MOBILE || orientationTried) return;
+  orientationTried = true;
+  try {
+    const so = screen.orientation;
+    if (so && so.lock) { const p = so.lock('landscape'); if (p && p.catch) p.catch(() => {}); }
+  } catch(_){}
 }
 window.addEventListener('resize', resize);
 window.addEventListener('orientationchange', () => setTimeout(resize,120));
@@ -120,19 +167,20 @@ const CFG = {
   /* ★ 伏黑甚尔 —— 天与咒缚：没有咒力的体术怪物，领域无法将其「选中」 */
   toji: {
     name: '伏黑甚尔',
-    maxHp: 2000, maxCe: 100, ceRegen: 12, speed: 355, r: 23,
+    /* ★ 无咒力：上限 0、不回复，所有技能消耗为 0，只受冷却限制 */
+    noCe: true, maxHp: 2000, maxCe: 0, ceRegen: 0, speed: 355, r: 23,
     /* 体术：全场最高的近战伤害与最远的拳脚距离 */
     atkDmg: 78, atkCd: 0.30, atkRange: 88,
     bodyDR: 0.25,   /* ★ 天与咒缚：没有咒力可被灌注，一切伤害 -25% */
     /* ★ 无反转术式：甚尔完全靠肉体硬扛，没有回复手段 */
     /* 天逆鉾：白色弧形闪光，命中后目标 5 秒无法使用术式与领域（远程消耗主力） */
-    heavenCost: 28, heavenCd: 7, heavenDmg: 130, heavenSeal: 5, heavenSpeed: 900,
+    heavenCost: 0, heavenCd: 7, heavenDmg: 130, heavenSeal: 5, heavenSpeed: 900,
     /* 万里锁：钩中目标 → 拽向自己 + 3 秒眩晕（拉近远程的关键） */
-    chainCost: 35, chainCd: 10, chainDmg: 60, chainStun: 3,
+    chainCost: 0, chainCd: 10, chainDmg: 60, chainStun: 3,
     chainSpeed: 1250, chainPull: 0.55, chainRange: 900,
     /* 蝇头：与脱兔同类的小型召唤物（棕黄），每次 4 只、无上限、无攻击
        → 朝敌方呈扇形扑出，作为挡弹幕的肉盾 */
-    flyCost: 18, flyCd: 5, flyHp: 70, flyDur: 6, flyCount: 4, flySpeed: 340,
+    flyCost: 0, flyCd: 5, flyHp: 70, flyDur: 6, flyCount: 4, flySpeed: 340,
     heavenImmuneDomain: true,   /* ★ 无法被领域选中 */
   }
 };
@@ -258,8 +306,52 @@ const hudEl = document.getElementById('hud');
 const ctrlEl = document.getElementById('controls');
 const tipsEl = document.getElementById('tips');
 
+/* ══════════════════════════════════════════
+   ★ 副标题：从 assets/subtitle.txt 随机取一行（每次回到菜单都重新抽）
+   说明：file:// 下浏览器会拦截 fetch，此时自动退回内置文案（内容与 txt 一致）
+   ══════════════════════════════════════════ */
+const SUBTITLE_FALLBACK = [
+  '最强的咒术师，与最古老的诅咒之王',
+  '五条悟 VS 两面宿傩',
+  '领域之内，皆是术师的坟墓',
+  '无下限之下，万物皆为虚无',
+  '汝等，值得吾拔刀相向',
+  '天与咒缚 · 无咒力者亦能斩神',
+  '审判已下，罪与罚同至',
+  '影之十种，皆奉吾为主',
+];
+let SUBTITLES = [];
+let lastSubtitleIdx = -1;
+
+function loadSubtitles(){
+  if (typeof fetch !== 'function') return;
+  fetch('assets/subtitle.txt', { cache: 'no-store' })
+    .then(r => (r && r.ok) ? r.text() : Promise.reject(new Error('fetch failed')))
+    .then(txt => {
+      const lines = String(txt).split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+      if (lines.length){ SUBTITLES = lines; applySubtitle(); }
+    })
+    .catch(() => { /* file:// 或缺失：使用内置文案 */ });
+}
+
+function pickSubtitle(){
+  const pool = SUBTITLES.length ? SUBTITLES : SUBTITLE_FALLBACK;
+  if (!pool.length) return '';
+  if (pool.length === 1) return pool[0];
+  let i = Math.floor(Math.random() * pool.length);
+  if (i === lastSubtitleIdx) i = (i + 1) % pool.length;   /* 避免连续重复 */
+  lastSubtitleIdx = i;
+  return pool[i];
+}
+
+function applySubtitle(){
+  const box = document.getElementById('menuSubtitle');
+  if (box) box.textContent = pickSubtitle();
+}
+
 function showMenu(){
   G.state = 'menu';
+  applySubtitle();                 /* ★ 每次回到菜单随机换一行 */
   menuEl.classList.remove('hidden');
   selectEl.classList.add('hidden');
   overlayEl.classList.remove('show');
@@ -447,6 +539,9 @@ function updateHUDElements(){
   pPanel.querySelector('.pname').style.color = nameColor(player.type);
   ePanel.querySelector('.pname').textContent = enemy.name;
   ePanel.querySelector('.pname').style.color = nameColor(enemy.type);
+  /* ★ 无咒力角色（伏黑甚尔）隐藏咒力条 */
+  pPanel.classList.toggle('noce', !!(CFG[player.type] && CFG[player.type].noCe));
+  ePanel.classList.toggle('noce', !!(CFG[enemy.type] && CFG[enemy.type].noCe));
 }
 
 /* ══════════════════════════════════════════
@@ -552,13 +647,14 @@ const CHAR_INFO = {
   },
   toji: {
     title: '伏黑甚尔',
-    stats: 'HP 2000 · 咒力 100 · 速度 355 · 体术 78',
+    stats: 'HP 2000 · 无咒力 · 速度 355 · 体术 78',
     skills: [
       ['体术', 'J · 近战重击 78 伤害 / 0.30s（触及约 134），出拳自带前压步持续压迫'],
-      ['天逆鉾', 'Q · 28 咒力 / 7s · 远程弧形闪光 130 伤害，命中后目标 5 秒内无法使用术式与领域'],
-      ['万里锁', 'E · 35 咒力 / 10s · 900 距离钩中敌人：60 伤害 + 拽向自己 + 眩晕 3 秒（对抗远程的核心）'],
-      ['蝇头', 'T · 18 咒力 / 5s · 朝敌方扇形扑出 4 只棕黄小飞虫（70 HP、无攻击），替自己挡弹幕'],
+      ['天逆鉾', 'Q · 7s CD · 远程弧形闪光 130 伤害，命中后目标 5 秒内无法使用术式与领域'],
+      ['万里锁', 'E · 10s CD · 900 距离钩中敌人：60 伤害 + 拽向自己 + 眩晕 3 秒（对抗远程的核心）'],
+      ['蝇头', 'T · 5s CD · 朝敌方扇形扑出 4 只棕黄小飞虫（70 HP、无攻击），替自己挡弹幕'],
       ['天与咒缚', '被动 · 速度 355 全场最高；一切伤害 −25%；无法被任何领域「选中」；没有反转术式'],
+      ['无咒力', '被动 · 天与咒缚之躯不产生咒力，所有技能不消耗咒力，但依旧有冷却时间'],
     ],
   },
 };
@@ -597,54 +693,128 @@ const SKILL_PRIORITY = {
 };
 const skillPriority = s => (SKILL_PRIORITY[s.act] !== undefined ? SKILL_PRIORITY[s.act] : 2);
 
+/* ★ 技能动作 → 消耗的咒力字段（0 / 未配置 = 不显示消耗角标） */
+const COST_FIELD = {
+  bluefist:'bfCost',
+  blue:'blueCost', red:'redCost', purple:'purpleCost', reverse:'reverseCost', domain:'domainCost',
+  fire:'fireCost', dismantle:'dismantleCost',
+  nue:'nueCost', dog:'dogCost', tobi:'tobiCost', mahoraga:'mahoCost', space:'spaceCost',
+  shinuchi:'shinuchiCost', sentence:'sentenceCost',
+  heaven:'heavenCost', chain:'chainCost', fly:'flyCost',
+};
+function skillCost(act, type){
+  const cfg = CFG[type];
+  const f = COST_FIELD[act];
+  if (!cfg || !f) return 0;
+  const v = cfg[f];
+  return (finite(v) && v > 0) ? Math.round(v) : 0;
+}
+
+/* ══════════════════════════════════════════
+   ★ 按键排布：内外两圈圆弧（圆心 = 右下角普攻键）
+   —— 每圈最多 4 个，外圈排满后才开始排内圈
+   —— 数值越大越靠近圆心（内侧），即越常用的技能越好按
+   ══════════════════════════════════════════ */
+const ARC_PER_RING = 4;      /* 每圈最多容纳的按钮数 */
+const ARC_START = 184;       /* 起始角度（屏幕角度：180 = 正左） */
+const ARC_END   = 266;       /* 结束角度（270 = 正上） */
+
+function makeSkillBtn(s){
+  const btn = document.createElement('button');
+  btn.className = 'skill' + (s.cls ? ' ' + s.cls : '');
+  btn.dataset.act = s.act;
+  btn.innerHTML = `${s.label}<span class="sub">${s.sub}</span>`;
+
+  /* ★ 咒力消耗角标 */
+  const cost = skillCost(s.act, player.type);
+  if (cost > 0){
+    const cEl = document.createElement('span');
+    cEl.className = 'cost';
+    cEl.textContent = cost;
+    btn.appendChild(cEl);
+    btn._costEl = cEl;
+    btn._cost = cost;
+  }
+
+  /* ★ CD 动画：扇形遮罩 + 剩余秒数 */
+  const mask = document.createElement('span');
+  mask.className = 'cdmask';
+  btn.appendChild(mask);
+  const cdtxt = document.createElement('span');
+  cdtxt.className = 'cdtxt';
+  btn.appendChild(cdtxt);
+  btn._cdtxt = cdtxt;
+  btn.style.setProperty('--p', 0);
+
+  btn.addEventListener('pointerdown', e => {
+    e.preventDefault(); e.stopPropagation();
+    hideTips();
+    tryLockLandscape();
+    if (G.state !== 'playing' || !player || !player.alive) return;
+    if (s.act === 'attack') holdAttack = true;
+    handleAction(s.act);
+  });
+  if (s.act === 'attack'){
+    const off = () => { holdAttack = false; };
+    btn.addEventListener('pointerup', off);
+    btn.addEventListener('pointercancel', off);
+    btn.addEventListener('pointerleave', off);
+  }
+  if (s.act === 'blue'){
+    /* ★ 手机端：长按「苍」按钮同样能蓄力成吸附型引力球 */
+    const onB  = () => { blueHoldBtn = true; };
+    const offB = () => { blueHoldBtn = false; };
+    btn.addEventListener('pointerdown', onB);
+    btn.addEventListener('pointerup', offB);
+    btn.addEventListener('pointercancel', offB);
+    btn.addEventListener('pointerleave', offB);
+  }
+  return btn;
+}
+
 function renderControls(){
   ctrlEl.innerHTML = '';
   btns = {};
-  /* ★ 越常用的技能越靠近右下角（拇指落点），普攻单独占一行、贴右下角 */
-  const list = (SKILL_SETS[player.type] || []).slice().sort((a, b) => skillPriority(a) - skillPriority(b));
-  const cols = 4;
-  ctrlEl.style.gridTemplateColumns = `repeat(${cols}, auto)`;
 
-  for (const s of list){
-    const btn = document.createElement('button');
-    btn.className = 'skill' + (s.cls ? ' ' + s.cls : '');
-    btn.dataset.act = s.act;
-    btn.innerHTML = `${s.label}<span class="sub">${s.sub}</span>`;
-    /* ★ CD 动画：扇形遮罩 + 剩余秒数 */
-    const mask = document.createElement('span');
-    mask.className = 'cdmask';
-    btn.appendChild(mask);
-    const cdtxt = document.createElement('span');
-    cdtxt.className = 'cdtxt';
-    btn.appendChild(cdtxt);
-    btn._cdtxt = cdtxt;
-    btn.style.setProperty('--p', 0);
-    /* ★ 普攻键固定落在最右列的第一个空位：紧贴右下角，并与上方技能对齐 */
-    if (s.act === 'attack') btn.style.gridColumn = cols + ' / ' + (cols + 1);
-    btn.addEventListener('pointerdown', e => {
-      e.preventDefault(); e.stopPropagation();
-      hideTips();
-      if (G.state !== 'playing' || !player || !player.alive) return;
-      if (s.act === 'attack') holdAttack = true;
-      handleAction(s.act);
-    });
-    if (s.act === 'attack'){
-      const off = () => { holdAttack = false; };
-      btn.addEventListener('pointerup', off);
-      btn.addEventListener('pointercancel', off);
-      btn.addEventListener('pointerleave', off);
-    }
-    if (s.act === 'blue'){
-      /* ★ 手机端：长按「苍」按钮同样能蓄力成吸附型引力球 */
-      const onB  = () => { blueHoldBtn = true; };
-      const offB = () => { blueHoldBtn = false; };
-      btn.addEventListener('pointerdown', onB);
-      btn.addEventListener('pointerup', offB);
-      btn.addEventListener('pointercancel', offB);
-      btn.addEventListener('pointerleave', offB);
-    }
+  const list = (SKILL_SETS[player.type] || []).slice().sort((a, b) => skillPriority(a) - skillPriority(b));
+  const atkBtnCfg = list.find(s => s.act === 'attack');
+  const ring = list.filter(s => s.act !== 'attack');
+
+  /* 按钮直径与圆弧半径随视口自适应 */
+  const bs = Math.round(clamp(Math.min(W, H) * 0.115, 40, 62));
+  const rIn = bs * 1.95, rOut = bs * 3.05;
+  const box = Math.round(rOut + bs * 0.5);
+  ctrlEl.style.width  = box + 'px';
+  ctrlEl.style.height = box + 'px';
+
+  /* 圆心 = 控制区右下角（拇指自然落点） */
+  const cx = box, cy = box;
+  const put = (btn, x, y, size) => {
+    btn.style.width  = size + 'px';
+    btn.style.height = size + 'px';
+    btn.style.left = Math.round(x - size/2) + 'px';
+    btn.style.top  = Math.round(y - size/2) + 'px';
     ctrlEl.appendChild(btn);
-    btns[s.act] = btn;
+    btns[btn.dataset.act] = btn;
+  };
+
+  /* ① 先排外圈（最多 4 个），排满后再排内圈 */
+  const step = (ARC_END - ARC_START) / ARC_PER_RING;
+  const maxOnRings = ARC_PER_RING * 2;
+  for (let i = 0; i < ring.length && i < maxOnRings; i++){
+    const s = ring[i];
+    const outer = i < ARC_PER_RING;
+    const k = outer ? i : i - ARC_PER_RING;
+    const r = outer ? rOut : rIn;
+    const deg = ARC_START + (k + 0.5) * step;
+    const rad = deg * Math.PI / 180;
+    put(makeSkillBtn(s), cx + Math.cos(rad)*r, cy + Math.sin(rad)*r, bs);
+  }
+
+  /* ② 普攻：圆弧圆心，比技能键更大 */
+  if (atkBtnCfg){
+    const ab = Math.round(bs * 1.22);
+    put(makeSkillBtn(atkBtnCfg), cx - ab/2, cy - ab/2, ab);
   }
 }
 
@@ -2463,13 +2633,13 @@ function updateDomains(dt){
 /* ══════════════════════════════════════════
    ★ 伏魔御厨子 · 自动斩击特效
    随机角度的刀光，直接劈在角色身上
-   两面宿傩：白 / 黄色刀光    十影宿傩：紫 / 灰色刀光
+   两面宿傩：红色刀光    十影宿傩：紫色刀光
    ══════════════════════════════════════════ */
 const DOMAIN_SLASH_STEP = 0.09;      /* 每隔多久劈出一刀（仅影响刀光频率，不改领域 DPS） */
 
 function domainSlashPalette(type){
-  if (type === 'sukunaTs') return { a:'#c07bff', b:'#9aa4b2' };   /* 紫 / 灰 */
-  return { a:'#ffffff', b:'#ffd24a' };                            /* 白 / 黄 */
+  if (type === 'sukunaTs') return { a:'#a855ff', b:'#c98bff' };   /* 十影宿傩：紫 */
+  return { a:'#ff3b3b', b:'#ff8a6a' };                            /* 两面宿傩：红 */
 }
 
 function spawnDomainSlash(type, x, y){
@@ -4168,15 +4338,18 @@ function updateHUD(){
   if (!player || !enemy) return;
   if (el.php) el.php.style.transform = `scaleX(${clamp(player.hp/player.maxHp,0,1)})`;
   if (el.phpt) el.phpt.textContent = `${Math.ceil(player.hp)} / ${player.maxHp}`;
-  const pMax = player.maxCe;
-  if (el.pce) el.pce.style.transform = `scaleX(${clamp(player.ce/pMax,0,1)})`;
-  if (el.pcet) el.pcet.textContent = `${Math.floor(player.ce)} / ${pMax}`;
+  /* ★ 无咒力角色（伏黑甚尔）：隐藏咒力条读数 */
+  const pNoCe = !!(CFG[player.type] && CFG[player.type].noCe);
+  const pMax = Math.max(1, player.maxCe);
+  if (el.pce) el.pce.style.transform = `scaleX(${pNoCe ? 0 : clamp(player.ce/pMax,0,1)})`;
+  if (el.pcet) el.pcet.textContent = pNoCe ? '无咒力' : `${Math.floor(player.ce)} / ${pMax}`;
 
   if (el.shp) el.shp.style.transform = `scaleX(${clamp(enemy.hp/enemy.maxHp,0,1)})`;
   if (el.shpt) el.shpt.textContent = `${Math.ceil(enemy.hp)} / ${enemy.maxHp}`;
-  const eMax = enemy.maxCe;
-  if (el.sce) el.sce.style.transform = `scaleX(${clamp(enemy.ce/eMax,0,1)})`;
-  if (el.scet) el.scet.textContent = `${Math.floor(enemy.ce)} / ${eMax}`;
+  const eNoCe = !!(CFG[enemy.type] && CFG[enemy.type].noCe);
+  const eMax = Math.max(1, enemy.maxCe);
+  if (el.sce) el.sce.style.transform = `scaleX(${eNoCe ? 0 : clamp(enemy.ce/eMax,0,1)})`;
+  if (el.scet) el.scet.textContent = eNoCe ? '无咒力' : `${Math.floor(enemy.ce)} / ${eMax}`;
 }
 
 /* ★ 技能动作 → 冷却字段 / 冷却总时长字段 */
@@ -4227,8 +4400,15 @@ function updateButtons(){
   if (btns.infinity) btns.infinity.classList.toggle('on', p.infinity);
   if (btns.bluefist) btns.bluefist.classList.toggle('on', p.blueFist);
 
-  /* ★ 先刷新所有按键的 CD 扇形动画 */
-  for (const s of (SKILL_SETS[p.type] || [])) paintCooldown(s.act, p, p.type);
+  /* ★ 刷新所有按键的 CD 扇形动画与咒力消耗提示 */
+  for (const s of (SKILL_SETS[p.type] || [])){
+    paintCooldown(s.act, p, p.type);
+    const b = btns[s.act];
+    if (b && b._costEl){
+      const lack = p.ce < b._cost;
+      if (b._lack !== lack){ b._lack = lack; b._costEl.classList.toggle('lack', lack); }
+    }
+  }
 
   const setCool = (act, cool, extra) => {
     const b = btns[act];
@@ -4314,6 +4494,10 @@ function loop(now){
   requestAnimationFrame(loop);
 }
 
+loadSubtitles();
+/* ★ 首次交互时尝试锁定横屏（手机端） */
+window.addEventListener('pointerdown', tryLockLandscape, { once: true });
+window.addEventListener('touchstart', tryLockLandscape, { once: true });
 showMenu();
 requestAnimationFrame(loop);
 
