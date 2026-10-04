@@ -801,28 +801,69 @@ function renderControls(){
   if (!ringCounts.length) ringCounts.push(0);
   const rings = ringCounts.length;
 
-  /* 按钮直径：随视口自适应；需要 3 圈时整体收一档，避免操作区过大 */
-  const sizeMul = rings >= 3 ? 0.88 : 1;
-  const bs = Math.max(36, Math.round(clamp(Math.min(W, H) * 0.105, 38, 54) * sizeMul));
-  const pitch = bs + ARC_GAP;                 /* 相邻按钮圆心距下限 */
+  /* 按钮直径：所有角色统一（不再因圈数变多而缩小），随视口自适应 */
+  const bs = Math.round(clamp(Math.min(W, H) * 0.115, 42, 60));
+  const pitch = bs + ARC_GAP;                          /* 相邻按钮圆心距下限 */
   const spanRad = (ARC_END - ARC_START) * Math.PI / 180;
+  const slotRad = spanRad / ARC_PER_RING;              /* 一个「半格」角度：22.5° */
 
-  /* 满足「同一圈内相邻按钮不挨太近」所需的最小半径 */
+  /* ① 各圈角度：相邻两圈错开半格（径向相邻的按钮角度不重合） */
+  const ringAngles = [];
+  for (let k = 0; k < rings; k++){
+    const m = ringCounts[k];
+    if (!m) { ringAngles.push([]); continue; }
+    const off = (k > 0 && m === ARC_PER_RING && (k % 2)) ? (slotRad / 2) * 180 / Math.PI : 0;
+    if (m === ARC_PER_RING || k === 0){
+      /* 满圈 / 最内圈：在区间内均匀分布 */
+      const arr = [];
+      for (let j = 0; j < m; j++) arr.push(ARC_START + off + (j + 0.5) * (ARC_END - ARC_START) / m);
+      ringAngles.push(arr);
+    } else {
+      /* 不满一圈：插在上一圈两个按钮之间的空隙中央（离邻居最远） */
+      const prev = ringAngles[k-1];
+      const bounds = [ARC_START, ...prev, ARC_END];
+      const gaps = [];
+      for (let j = 0; j + 1 < bounds.length; j++)
+        gaps.push({ c: (bounds[j] + bounds[j+1]) / 2, w: bounds[j+1] - bounds[j] });
+      gaps.sort((a, b) => b.w - a.w);
+      ringAngles.push(gaps.slice(0, m).sort((a, b) => a.c - b.c).map(g => g.c));
+    }
+  }
+
+  /* ② 半径：先由「同圈相邻不重叠」定出最内半径 */
   let rIn = 0;
-  for (const m of ringCounts)
-    if (m > 1) rIn = Math.max(rIn, pitch / (2 * Math.sin(spanRad / (2*m))));
-  /* 同时不能压到圆心的普攻键上 */
-  rIn = Math.max(rIn, bs * 1.98 + ARC_GAP);
-  rIn = Math.round(rIn);
+  for (let k = 0; k < rings; k++){
+    const m = ringCounts[k];
+    if (m < 2) continue;
+    /* 不满一圈且非最内圈时按空隙插入，其自身间距仍等于一个 slot */
+    const stepA = (m >= ARC_PER_RING ? slotRad : (k === 0 ? spanRad / m : slotRad));
+    rIn = Math.max(rIn, pitch / (2 * Math.sin(stepA / 2)));
+  }
+  rIn = Math.max(rIn, bs * 1.98 + ARC_GAP);            /* 不能压到圆心的普攻键 */
 
-  /* 第 0 圈在最外，往内每圈缩一个 pitch */
-  const radii = ringCounts.map((_, k) => rIn + (rings - 1 - k) * pitch);
-  const box = Math.round(radii[0] + bs * 0.5);
-  ctrlEl.style.width  = box + 'px';
-  ctrlEl.style.height = box + 'px';
+  /* ③ 由内向外逐圈求间距：错开半格后，相邻圈所需的径向距离远小于一个 pitch */
+  const cS = 2 * (1 - Math.cos(slotRad / 2));
+  const radiiIn = [rIn];
+  for (let k = 1; k < rings; k++){
+    const r0 = radiiIn[k-1];
+    let d = (-cS*r0 + Math.sqrt(Math.max(1, 4*pitch*pitch - (4*cS - cS*cS)*r0*r0))) / 2;
+    if (!finite(d) || d < 2) d = pitch * 0.55;         /* 兜底 */
+    radiiIn.push(r0 + d);
+  }
+  const radii = radiiIn.slice().reverse();             /* 第 0 个 = 最外圈 */
+
+  /* ④ 控制区尺寸（过大的屏幕下按比例整体收缩，避免占到半个屏幕） */
+  let box = Math.round(radii[0] + bs * 0.5);
+  const boxMax = Math.round(Math.min(W, H) * 0.70);
+  const fit = box > boxMax ? boxMax / box : 1;
+  const bsEff = Math.max(34, Math.round(bs * fit));
+  const boxF = Math.round(box * fit);
+  ctrlEl.style.width  = boxF + 'px';
+  ctrlEl.style.height = boxF + 'px';
 
   /* 圆心 = 控制区右下角（拇指自然落点） */
-  const cx = box, cy = box;
+  const cx = boxF, cy = boxF;
+  const kScale = boxF / box;
   const put = (btn, x, y, size) => {
     btn.style.width  = size + 'px';
     btn.style.height = size + 'px';
@@ -837,19 +878,18 @@ function renderControls(){
   for (let k = 0; k < rings; k++){
     const m = ringCounts[k];
     if (!m) break;
-    const r = radii[k];
+    const r = radii[k] * kScale;
     for (let j = 0; j < m; j++, idx++){
       const s = ring[idx];
       if (!s) break;
-      const deg = ARC_START + (j + 0.5) * (ARC_END - ARC_START) / m;
-      const rad = deg * Math.PI / 180;
-      put(makeSkillBtn(s), cx + Math.cos(rad)*r, cy + Math.sin(rad)*r, bs);
+      const rad = ringAngles[k][j] * Math.PI / 180;
+      put(makeSkillBtn(s), cx + Math.cos(rad)*r, cy + Math.sin(rad)*r, bsEff);
     }
   }
 
   /* ② 普攻：圆弧圆心，比技能键更大 */
   if (atkBtnCfg){
-    const ab = Math.round(bs * 1.22);
+    const ab = Math.round(bsEff * 1.22);
     put(makeSkillBtn(atkBtnCfg), cx - ab/2, cy - ab/2, ab);
   }
 }
