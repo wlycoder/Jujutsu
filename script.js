@@ -20,16 +20,20 @@ const AUTO_ATK_RANGE = 520;
 
 /* ══════════════════════════════════════════
    ★ 人机难度：普通（原有 AI）/ 熟练（更强）
-   speed   移动速度倍率
-   dodgeR  闪避探测半径   dodgeCone 闪避判定角
-   reserve 释放术式时保留的咒力余量（越小越敢放）
-   healAt  反转术式的血量阈值倍率（越大越早治疗）
+   speed     移动速度倍率
+   dodgeR    闪避探测半径
+   dodgeWin  反应窗口（秒）：弹道剩余飞行时间小于它就做出闪避
+   dodgeHold 闪避方向锁定时间（秒）0 = 每帧重判（会原地小幅度抖动）
+   kite      对近战敌人保持的风筝距离（0 = 不风筝，不会利用远程优势）
+   reserve   释放术式时保留的咒力余量（越小越敢放）
+   healAt    反转术式的血量阈值倍率（越大越早治疗）
    domHp / domD  领域展开的血量/距离阈值（越大越早开）
+   prob      术式释放概率倍率
    ══════════════════════════════════════════ */
 let AI_LEVEL = 'normal';
 const AI_TUNE = {
-  normal: { speed: 1.00, dodgeR: 380, dodgeCone: 0.30, reserve: 14, healAt: 1.00, domHp: 0.55, domD: 285, prob: 1.00 },
-  pro:    { speed: 1.09, dodgeR: 470, dodgeCone: 0.42, reserve: 4,  healAt: 1.25, domHp: 0.72, domD: 370, prob: 1.35 },
+  normal: { speed: 1.00, dodgeR: 380, dodgeWin: 0.55, dodgeHold: 0.00, kite: 0,   reserve: 14, healAt: 1.00, domHp: 0.55, domD: 285, prob: 1.00, charge: 1 },
+  pro:    { speed: 1.09, dodgeR: 520, dodgeWin: 1.10, dodgeHold: 0.30, kite: 430, reserve: 4,  healAt: 1.25, domHp: 0.72, domD: 370, prob: 1.35, charge: 1 },
 };
 function aiTune(f){ return (f && f.aiPro) ? AI_TUNE.pro : AI_TUNE.normal; }
 /* ★ 熟练人机会更频繁地释放术式（概率上限 98%，保留少量走位节奏） */
@@ -50,6 +54,9 @@ const SFX_UNIVERSAL = {
   reverse:     ['universal/reverse.ogg'],                    /* 反转术式 */
   domainSpawn: ['universal/domainSpawn.ogg'],                /* 领域生成中 */
   domainBreak: ['universal/domainBreak.ogg'],                /* 领域破碎 */
+  remote:      ['universal/remote.ogg'],                     /* ★ 远程普攻 */
+  combat:      ['universal/combat1.ogg', 'universal/combat2.ogg'],  /* ★ 近战普攻（随机） */
+  victory:     ['universal/victory.ogg'],                    /* ★ 人机对战胜利 */
 };
 /* 角色专属 */
 const SFX_CHAR = {
@@ -60,6 +67,7 @@ const SFX_CHAR = {
     purpleBlast: ['gojo/purpleExplode.ogg'],                   /* 茈 · 爆炸（赫撞吸附苍） */
     domain:      ['gojo/domain1.ogg', 'gojo/domain2.ogg'],     /* 领域展开：随机一个 */
     brainbreak:  ['gojo/brainBreak.ogg'],                      /* 破脑 */
+    blueFist:    ['gojo/buleFist.ogg'],                        /* ★ 苍拳（文件名就是 buleFist.ogg） */
   },
   sukuna: {
     domain:    ['sukuna/domain.ogg'],                          /* 伏魔御厨子 · 展开 */
@@ -67,9 +75,18 @@ const SFX_CHAR = {
     dismantle: ['sukuna/slashAtk.ogg'],                        /* 解 */
     slash:     ['sukuna/slash1.ogg', 'sukuna/slash2.ogg', 'sukuna/slash3.ogg'],  /* 领域自动斩击：随机一个 */
   },
+  /* ★ 十影宿傩专属音效（注意目录名是大写 TS） */
+  sukunaTs: {
+    domain:       ['sukunaTS/domain.ogg'],                     /* 领域展开 */
+    slash:        ['sukunaTS/slash1.ogg', 'sukunaTS/slash2.ogg', 'sukunaTS/slash3.ogg'], /* 领域自动斩击 */
+    spawn:        ['sukunaTS/spawn1.ogg', 'sukunaTS/spawn2.ogg', 'sukunaTS/spawn3.ogg'], /* 召唤式神：随机 */
+    mahoragaAtk:  ['sukunaTS/mahoragaAtk.ogg'],                /* 魔虚罗攻击 */
+    mahoragaAdapt:['sukunaTS/mahoragaAdapt.ogg'],              /* 魔虚罗适应触发 */
+    chimeraAtk:   ['sukunaTS/chimeraAtk1.ogg', 'sukunaTS/chimeraAtk2.ogg'],             /* 嵌合兽攻击：随机 */
+  },
 };
 
-const SFX_VOL = 0.55;         /* 主音量 */
+let SFX_VOL = 0.55;           /* 主音量（可在设置窗口调节） */
 const SFX_POOL = 3;           /* 每个音效的并发副本数（短时间内可叠放） */
 const SFX_MIN_GAP = 70;       /* 同一音效的最小重播间隔（ms） */
 const SLASH_SFX_GAP = 80;    /* ★ 领域自动斩击音效的最小间隔（视觉 11 刀/秒，音频不能照搬） */
@@ -167,6 +184,36 @@ function toggleMute(){
       text: sfxMuted ? '音效 · 关' : '音效 · 开', color:'#9fd8ff', size:15 });
 }
 
+/* ══════════════════════════════════════════
+   ★ 设置项（音效音量 / 自动防御）—— localStorage 持久化
+   自动防御：敌方领域降临时自动展开「简易领域 / 弥虚葛笼」，
+             五条悟自动维持「无下限」；咒力快被抗衡抽干时自动引爆收束
+   ══════════════════════════════════════════ */
+let AUTO_DEF = true;
+const SETTINGS_KEY = 'jujutsu.settings.v1';
+
+function saveSettings(){
+  try { localStorage.setItem(SETTINGS_KEY, JSON.stringify({ vol: SFX_VOL, autoDef: AUTO_DEF })); } catch(_){}
+}
+
+function loadSettings(){
+  try {
+    const raw = localStorage.getItem(SETTINGS_KEY);
+    if (!raw) return;
+    const o = JSON.parse(raw) || {};
+    if (finite(o.vol)) SFX_VOL = clamp(o.vol, 0, 1);
+    if (typeof o.autoDef === 'boolean') AUTO_DEF = o.autoDef;
+  } catch(_){ /* 隐私模式 / file:// 下 localStorage 可能不可用，忽略 */ }
+}
+
+/* 音量：同时作用到已建好的音频池与之后新建的副本 */
+function setSfxVolume(v){
+  SFX_VOL = clamp(v, 0, 1);
+  for (const f in sfxPool)
+    for (const a of sfxPool[f].list){ try { a.volume = SFX_VOL; } catch(_){} }
+  saveSettings();
+}
+
 const clamp = (v,a,b) => v < a ? a : (v > b ? b : v);
 const rnd = (a,b) => a + Math.random()*(b-a);
 const dist = (a,b) => Math.hypot(a.x-b.x, a.y-b.y);
@@ -250,9 +297,12 @@ const CFG = {
     domainName: '无量空处',
     domainBaseR: 365, domainOpenTime: 0.45, domainGrowRate: 0,
     domainMaxR: 365, domainDuration: 5.2, domainDps: 0,
+    /* ★ 站在自己领域内时的攻击力倍率（各角色不同） */
+    domainAtkBuff: 1.35,
     brainBreakCost: 0.18, brainBreakStun: 0.45,
     brainBleed: 0.06, brainBreakMinHp: 0.28,
-    /* ★ 简易领域（五条悟名）：身下生成跟随移动的绿色圆环，4 秒内免疫敌方领域 */
+    /* ★ 简易领域（五条悟名）：身下生成跟随移动的绿色圆环，基础 4 秒内免疫敌方领域
+       其余机制（抗衡耗咒力 / 蓄势 / 引爆 / 完美展开）统一见 SD_TUNE */
     sdCost: 25, sdCd: 18, sdDuration: 4, sdR: 118,
   },
   sukuna: {
@@ -268,6 +318,8 @@ const CFG = {
     domainName: '伏魔御厨子',
     domainBaseR: 390, domainOpenTime: 0.5, domainGrowRate: 78,
     domainMaxR: 1600, domainDuration: 8.5, domainDps: 34,
+    /* ★ 站在自己领域内时的攻击力倍率（各角色不同） */
+    domainAtkBuff: 1.30,
     /* ★ 弥虚葛笼：身下生成跟随移动的绿色圆环，4 秒内免疫敌方领域 */
     sdCost: 25, sdCd: 18, sdDuration: 4, sdR: 120,
   },
@@ -286,9 +338,19 @@ const CFG = {
     /* ★ 魔虚罗：有血量、会砍击、会适应（无时间限制，每次场上限1只） */
     mahoCost: 55, mahoCd: 17, mahoDmg: 90, mahoHp: 520,
     mahoAdaptStep: 0.12, mahoAdaptMax: 0.85,
-    /* ★ 嵌合兽：与魔虚罗同体积（r=40）的橙色兽，攻击逻辑类似玉犬（贴身撕咬，有时限） */
-    chimeraCost: 45, chimeraCd: 14, chimeraHp: 340, chimeraDmg: 48,
-    chimeraDur: 12, chimeraSpeed: 300, chimeraAtkInterval: 0.6,
+    /* ★ 魔虚罗越追越快（不是改基础速度）：连续追击时逐秒叠加速度 */
+    mahoChaseAdd: 0.22, mahoChaseMax: 1.00,
+    /* ★ 魔虚罗对领域的适应改为「累计在领域内待够时长」：
+       无量空处 → 5 秒后不再被僵直（但仍减速）；
+       伏魔御厨子 → 4 秒后获得减伤 */
+    mahoDomAdaptGojo: 5.0, mahoDomAdaptSukuna: 4.0,
+    mahoDomAdaptDR: 0.70, mahoDomAdaptSlow: 0.50,
+    /* ★ 魔虚罗陨落时，把适应成果转移给十影宿傩（自适应减伤） */
+    mahoTransferStep: 0.05, mahoTransferMax: 0.40,
+    /* ★ 嵌合兽：与魔虚罗同体积（r=40）的橙色兽，攻击逻辑类似玉犬（贴身撕咬，有时限）
+       —— 无任何光环装饰，定位为纯输出型 */
+    chimeraCost: 45, chimeraCd: 14, chimeraHp: 340, chimeraDmg: 56,
+    chimeraDur: 12, chimeraSpeed: 300, chimeraAtkInterval: 0.55,
     /* ★ 空间斩：需召唤过魔虚罗且其陨落后解锁 */
     spaceCost: 45, spaceCd: 14, spaceDmg: 320,
     domainCost: 60, domainCd: 36,
@@ -296,6 +358,8 @@ const CFG = {
     domainName: '伏魔御厨子',
     domainBaseR: 320, domainOpenTime: 0.55, domainGrowRate: 40,
     domainMaxR: 900, domainDuration: 7.0, domainDps: 22,
+    /* ★ 站在自己领域内时的攻击力倍率（各角色不同） */
+    domainAtkBuff: 1.25,
     /* ★ 弥虚葛笼：身下生成跟随移动的绿色圆环，4 秒内免疫敌方领域 */
     sdCost: 25, sdCd: 18, sdDuration: 4, sdR: 120,
   },
@@ -320,6 +384,8 @@ const CFG = {
     domainSeal: 10,        /* 进入领域的敌人 10 秒内无法使用任何主动术式 */
     domainSpeedMul: 1.30,  /* 领域内自身移速 +30% */
     domainDR: 0.30,        /* 领域内自身受到伤害 -30% */
+    /* ★ 站在自己领域内时的攻击力倍率（各角色不同） */
+    domainAtkBuff: 1.20,
   },
   /* ★ 伏黑甚尔 —— 天与咒缚：没有咒力的体术怪物，领域无法将其「选中」 */
   toji: {
@@ -339,6 +405,31 @@ const CFG = {
        → 朝敌方呈扇形扑出，作为挡弹幕的肉盾 */
     flyCost: 0, flyCd: 5, flyHp: 70, flyDur: 6, flyCount: 4, flySpeed: 340,
     heavenImmuneDomain: true,   /* ★ 无法被领域选中 */
+  },
+  /* ★ 真人 —— 无为转变：把灵魂的形态揉成想要的样子
+     数值参考《真人2》：HP 1300 / 咒力 110 / 速度 300 / 无反转术式
+     技能参考《真人1》：J 变形拳 / Q 无为转变 / E 改造人类 / T 内体变形 / 空格 自闭圆顿裹 */
+  mahito: {
+    name: '真人',
+    maxHp: 1300, maxCe: 110, ceRegen: 8.5, speed: 300, r: 23,
+    /* 变形拳：全场最长的近战触及（约 152），伤害偏低但出手快 */
+    atkDmg: 30, atkCd: 0.36, atkRange: 105,
+    /* ★ 无反转术式（不配置 reverseCost / reverseHeal 即为不会） */
+    /* 无为转变（双用）：前伸触手；命中 → 6 秒灵魂改造；未命中 → 反噬自身回血 200 */
+    itaiCost: 25, itaiCd: 8, itaiReach: 150, itaiDur: 6, itaiHeal: 200,
+    soulDps: 30, soulCeDrain: 10,        /* 灵魂改造：30 hp/s + 10 咒力/s */
+    /* 改造人类：扇形掷出 3 只改造人 */
+    humanCost: 35, humanCd: 9, humanCount: 3,
+    humanHp: 90, humanDmg: 24, humanDur: 7, humanSpeed: 340, humanAtkInterval: 0.6,
+    /* 内体变形：2.5 秒内免疫所有投射物、移速 +35%、攻击力 +25%（天逆鉾例外） */
+    formCost: 20, formCd: 11, formDur: 2.5, formSpeedMul: 1.35, formAtkMul: 1.25,
+    /* 自闭圆顿裹 */
+    domainCost: 60, domainCd: 30,
+    domainName: '自闭圆顿裹',
+    domainBaseR: 400, domainOpenTime: 0.5, domainGrowRate: 0,
+    domainMaxR: 400, domainDuration: 9.0, domainDps: 0,
+    domainSoulDur: 3,                    /* 领域内对敌人施加 3 秒灵魂改造 */
+    domainAtkBuff: 1.25,
   }
 };
 
@@ -360,6 +451,7 @@ const INTRO_QUOTES = {
       sukunaTs: '十种影子？那就一起上吧，反正结果一样',
       higuruma: '法官先生，我可没打算接受你的审判',
       toji: '术式都省了？那就用拳头说话',
+      mahito: '灵魂的形状？那可不由你说了算',
     },
   },
   sukuna: {
@@ -370,6 +462,7 @@ const INTRO_QUOTES = {
       sukunaTs: '区区十影，也配与本王同名',
       higuruma: '你的判决，本王一概不受',
       toji: '没有咒力的杂鱼，也敢挡在本王面前',
+      mahito: '会缝线的咒灵？倒是有点意思',
     },
   },
   sukunaTs: {
@@ -380,6 +473,7 @@ const INTRO_QUOTES = {
       sukunaTs: '影子对影子，看谁的更深',
       higuruma: '法庭？把法官一并斩了便是',
       toji: '没有术式的身体，斩起来最省事',
+      mahito: '灵魂的术式？那就把你的形状也一并斩开',
     },
   },
   higuruma: {
@@ -390,6 +484,7 @@ const INTRO_QUOTES = {
       sukunaTs: '藐视法庭，罪加一等',
       higuruma: '同僚？那便由我来审你',
       toji: '被告，天逆鉾不是免罪符',
+      mahito: '改造灵魂——这是对生命的亵渎，罪加一等',
     },
   },
   toji: {
@@ -400,6 +495,18 @@ const INTRO_QUOTES = {
       sukunaTs: '十影的咒灵，也一并宰了',
       higuruma: '法庭？我连判决一起斩了',
       toji: '两个我？正好，一个也不留',
+      mahito: '缝合线？我连灵魂一起斩',
+    },
+  },
+  mahito: {
+    self: '灵魂的形状，由我来定',
+    retort: {
+      gojo: '最强？那灵魂一定也很有趣',
+      sukuna: '诅咒之王？你我本就是同类',
+      sukunaTs: '十种影子，全都揉成一团吧',
+      higuruma: '审判灵魂？先看看你自己的形状',
+      toji: '天逆鉾啊……那就有点麻烦了',
+      mahito: '另一个我？那就看谁揉得更狠',
     },
   },
 };
@@ -440,8 +547,12 @@ function createFighter(type, x, y){
     infinity: type === 'gojo', blueFist: false, blueUsed: false, redUsed: false,
     blueCharge: 0,                 /* ★ 长按苍的蓄力计时 */
     blueSlow: 0, blueSlowMul: 1,   /* ★ 被吸附型苍减速的剩余时间 / 倍率 */
+    domSlow: 0, domSlowMul: 1,     /* ★ 领域适应后的减速（无量空处中可行动但变慢） */
+    soulAlter: 0,                  /* ★ 灵魂改造剩余时间 */
+    formT: 0, formAtk: 1,          /* ★ 内体变形：剩余时间 / 攻击力倍率 */
+    aiChargingBlue: false, chargeBlueT: 0,   /* ★ AI 蓄力苍 */
     brainDamaged: false,
-    cd: { blue:0, red:0, purple:0, domain:0, reverse:0, fire:0, dismantle:0, nue:0, dog:0, maho:0, chimera:0, tobi:0, space:0, shinuchi:0, sentence:0, heaven:0, chain:0, fly:0, sd:0 },
+    cd: { blue:0, red:0, purple:0, domain:0, reverse:0, fire:0, dismantle:0, nue:0, dog:0, maho:0, chimera:0, tobi:0, space:0, shinuchi:0, sentence:0, heaven:0, chain:0, fly:0, itai:0, human:0, form:0, sd:0 },
     domainLock: 0,
     skillLock: 0,   /* 审判：术式禁用剩余时间 */
     sentence: 0,    /* 死刑：受到伤害提升剩余时间 */
@@ -451,6 +562,12 @@ function createFighter(type, x, y){
     mahoDied: false,       // 召唤的魔虚罗是否已陨落
     spaceUnlocked: false,  // 空间斩是否解锁
     sd: null,              // ★ 简易领域 / 弥虚葛笼 { t, dur, r }
+    /* ★ 熟练人机的闪避锁定：一旦判定要闪，就沿同一方向持续一小段时间，
+       避免每帧重新随机方向导致「原地小幅抖动」 */
+    dodgeT: 0, dodgeAng: 0,
+    /* ★ 从陨落的魔虚罗处继承的适应成果 */
+    adaptDR: 0,            // 自适应减伤（所有来源）
+    adaptDomain: null,     // { gojo: 秒, sukuna: 秒 } 对领域的适应进度
   };
 }
 
@@ -459,6 +576,7 @@ function createFighter(type, x, y){
    ══════════════════════════════════════════ */
 const menuEl = document.getElementById('menu');
 const selectEl = document.getElementById('selectScreen');
+const settingsEl = document.getElementById('settingsScreen');
 const overlayEl = document.getElementById('overlay');
 const hudEl = document.getElementById('hud');
 const ctrlEl = document.getElementById('controls');
@@ -514,6 +632,7 @@ function showMenu(){
   applySubtitle();                 /* ★ 每次回到菜单随机换一行 */
   menuEl.classList.remove('hidden');
   selectEl.classList.add('hidden');
+  if (settingsEl) settingsEl.classList.add('hidden');
   overlayEl.classList.remove('show');
   hudEl.style.display = 'none';
   ctrlEl.style.display = 'none';
@@ -633,6 +752,44 @@ document.getElementById('restart').addEventListener('click', () => {
 });
 document.getElementById('backToMenu').addEventListener('click', () => showMenu());
 
+/* ★ 设置窗口：音量滑条 + 自动防御开关 */
+(function initSettings(){
+  const btn = document.getElementById('settingsBtn');
+  const backBtn = document.getElementById('settingsBackBtn');
+  const range = document.getElementById('volRange');
+  const volVal = document.getElementById('volVal');
+  const adBtn = document.getElementById('autoDefBtn');
+
+  const syncUI = () => {
+    if (range) range.value = String(Math.round(SFX_VOL * 100));
+    if (volVal) volVal.textContent = Math.round(SFX_VOL * 100) + '%';
+    if (adBtn){
+      adBtn.textContent = AUTO_DEF ? '开' : '关';
+      adBtn.classList.toggle('on', AUTO_DEF);
+    }
+  };
+
+  if (btn) btn.addEventListener('click', () => {
+    menuEl.classList.add('hidden');
+    selectEl.classList.add('hidden');
+    if (settingsEl) settingsEl.classList.remove('hidden');
+    syncUI();
+  });
+  if (backBtn) backBtn.addEventListener('click', () => showMenu());
+
+  if (range) range.addEventListener('input', () => {
+    setSfxVolume(parseInt(range.value, 10) / 100);
+    if (volVal) volVal.textContent = Math.round(SFX_VOL * 100) + '%';
+  });
+  if (adBtn) adBtn.addEventListener('click', () => {
+    AUTO_DEF = !AUTO_DEF;
+    saveSettings();
+    syncUI();
+  });
+
+  syncUI();
+})();
+
 /* ══════════════════════════════════════════
    开局
    ══════════════════════════════════════════ */
@@ -686,6 +843,8 @@ function updateTips(){
   }
   /* ★ 五条悟专属提示：长按苍 → 吸附型引力球 → 再接赫 = 大范围茈 */
   if (player.type === 'gojo') parts.push('长按 Q：苍·吸附 → 再按 E 赫 → 大范围茈');
+  /* ★ 简易领域 / 弥虚葛笼：再按一次 C = 引爆 */
+  if (finite(CFG[player.type].sdCost)) parts.push('再按 C：引爆（蓄势越高越痛、冷却越短）');
   tipsEl.innerHTML = parts.join(' · ') +
     (IS_MOBILE ? '<br>手机：左侧拖动移动 · 靠近敌人自动普攻 · 右下按钮释放术式'
                : '<br>按 J 普攻 · 按键或点击右下按钮释放术式');
@@ -751,7 +910,7 @@ function updateIntro(dt){
 /* 角色主题色（HUD 名牌 / 选人浮层共用） */
 const NAME_COLORS = {
   gojo: '#9fd8ff', sukunaTs: '#c9a4ff', higuruma: '#ffd76a', sukuna: '#ff8a8a',
-  toji: '#dfe4ea',
+  toji: '#dfe4ea', mahito: '#e2e6ea',
 };
 function nameColor(type){ return NAME_COLORS[type] || '#e7eaee'; }
 
@@ -774,10 +933,10 @@ const SKILL_SETS = {
   gojo: [
     { act:'domain',       label:'领域',      sub:'SPACE', cls:'gold' },
     { act:'infinity',     label:'无下限',    sub:'F' },
-    { act:'bluefist',     label:'苍拳',      sub:'G' },
+    { act:'bluefist',     label:'苍拳',      sub:'G', cls:'blue' },
     { act:'reverse',      label:'反转术式',  sub:'H', cls:'green' },
     { act:'simpledomain', label:'简易领域',  sub:'C', cls:'simpledomain' },
-    { act:'blue',         label:'苍',        sub:'Q' },
+    { act:'blue',         label:'苍',        sub:'Q', cls:'blue' },
     { act:'red',          label:'赫',        sub:'E', cls:'red' },
     { act:'purple',       label:'茈',        sub:'R', cls:'purple' },
     { act:'brainbreak',   label:'破脑',      sub:'P', cls:'red' },
@@ -816,6 +975,13 @@ const SKILL_SETS = {
     { act:'fly',     label:'蝇头',      sub:'T', cls:'fly' },
     { act:'attack',  label:'体术',      sub:'J', cls:'attackbtn' },
   ],
+  mahito: [
+    { act:'domain',  label:'领域',      sub:'SPACE', cls:'gold' },
+    { act:'form',    label:'内体变形',  sub:'T', cls:'mahito' },
+    { act:'human',   label:'改造人类',  sub:'E', cls:'shadow' },
+    { act:'itai',    label:'无为转变',  sub:'Q', cls:'mahito' },
+    { act:'attack',  label:'变形拳',    sub:'J', cls:'attackbtn' },
+  ],
 };
 
 /* ══════════════════════════════════════════
@@ -831,7 +997,7 @@ const CHAR_INFO = {
       ['苍', 'Q · 引力球，吸附并拉扯敌人；长按 → 吸附型：滞空、把敌人拉向球心并减速'],
       ['赫', 'E · 斥力球，命中强力击退；场上若有吸附型苍，则被其牵引'],
       ['茈', 'R · 需先释放 苍+赫，贯穿大伤害；赫 撞上吸附型苍 → 范围 480 紫色冲击波「茈」'],
-      ['简易领域', 'C · 脚下展开绿色圆环（跟随移动 4 秒）：其间敌方领域对你完全无效'],
+      ['简易领域', 'C · 脚下展开绿色圆环（跟随移动，基础 4 秒）盾住敌方领域<br>再按 C 引爆：伤害随「蓄势」层数提升，并大幅返还冷却<br>在敌方领域内抗衡会持续消耗咒力；敌方领域刚开 1.2 秒内响应 = 完美展开'],
       ['无量空处', '空格 · 领域，僵直敌方并封印领域 20 秒'],
       ['反转术式', 'H · 回复生命 / 修复受损大脑'],
       ['破脑', 'P · 自伤以重置领域冷却'],
@@ -845,7 +1011,7 @@ const CHAR_INFO = {
       ['解', 'Q · 高速大范围斩击，可贯穿'],
       ['开', 'E · 火焰弹'],
       ['伏魔御厨子', '空格 · 领域，持续灼烧且不断扩张'],
-      ['弥虚葛笼', 'C · 脚下展开绿色圆环（跟随移动 4 秒）：其间敌方领域对你完全无效'],
+      ['弥虚葛笼', 'C · 脚下展开绿色圆环（跟随移动，基础 4 秒）盾住敌方领域<br>再按 C 引爆：伤害随「蓄势」层数提升，并大幅返还冷却<br>在敌方领域内抗衡会持续消耗咒力；敌方领域刚开 1.2 秒内响应 = 完美展开'],
       ['反转术式', 'H · 回复生命'],
     ],
   },
@@ -859,7 +1025,7 @@ const CHAR_INFO = {
       ['魔虚罗', 'R · 白球+法轮，会适应减伤；场上限 1 只'],
       ['嵌合兽', 'V · 橙色巨躯（与魔虚罗同体积），贴身撕咬；12 秒后消散'],
       ['空间斩', 'F · 魔虚罗陨落后解锁，命中即巨额伤害'],
-      ['弥虚葛笼', 'C · 脚下展开绿色圆环（跟随移动 4 秒）：其间敌方领域对你完全无效（含己方式神）'],
+      ['弥虚葛笼', 'C · 脚下展开绿色圆环（跟随移动，基础 4 秒）盾住敌方领域（含己方式神）<br>再按 C 引爆：伤害随「蓄势」层数提升，并大幅返还冷却<br>在敌方领域内抗衡会持续消耗咒力；敌方领域刚开 1.2 秒内响应 = 完美展开'],
       ['伏魔御厨子', '空格 · 领域（削弱版）'],
       ['反转术式', 'H · 回复生命'],
     ],
@@ -878,14 +1044,26 @@ const CHAR_INFO = {
   },
   toji: {
     title: '伏黑甚尔',
-    stats: 'HP 2000 · 无咒力 · 速度 355 · 体术 78',
-    skills: [
+    stats: 'HP 2000 · 无咒力 · 速度 355 · 体术 78',    skills: [
       ['体术', 'J · 近战重击 78 伤害 / 0.30s（触及约 134），出拳自带前压步持续压迫'],
       ['天逆鉾', 'Q · 7s CD · 远程弧形闪光 130 伤害，命中后目标 5 秒内无法使用术式与领域'],
       ['万里锁', 'E · 10s CD · 900 距离钩中敌人：60 伤害 + 拽向自己 + 眩晕 3 秒（对抗远程的核心）'],
       ['蝇头', 'T · 5s CD · 朝敌方扇形扑出 4 只棕黄小飞虫（70 HP、无攻击），替自己挡弹幕'],
       ['天与咒缚', '被动 · 速度 355 全场最高；一切伤害 −25%；无法被任何领域「选中」；没有反转术式'],
       ['无咒力', '被动 · 天与咒缚之躯不产生咒力，所有技能不消耗咒力，但依旧有冷却时间'],
+    ],
+  },
+  mahito: {
+    title: '真人',
+    stats: 'HP 1300 · 咒力 110 · 速度 300 · 变形拳 30',
+    skills: [
+      ['变形拳', 'J · 近战长触及（约 152）· 30 伤害 / 0.36s'],
+      ['无为转变', 'Q · 25咒力 · 8s · 前伸触手（触及约 150）：命中则施加 6 秒「灵魂改造」；未命中则反噬自身、回复 200 生命'],
+      ['灵魂改造', '被动状态 · 30 hp/s 持续伤害 + 10 咒力/s 流失，紫黑缝合纹每秒收紧'],
+      ['改造人类', 'E · 35咒力 · 9s · 扇形掷出 3 只改造人（90 HP），自动追击敌人'],
+      ['内体变形', 'T · 20咒力 · 11s · 2.5 秒内免疫所有投射物，移速 +35%、攻击力 +25%'],
+      ['自闭圆顿裹', '空格 · 60咒力 · 30s · 领域：黑色球壳内一片紫黑，中央摊开一只缝合手掌；对敌人施加 3 秒灵魂改造'],
+      ['无反转术式', '被动 · 真人不掌握反转术式，只能靠无为转变自我修补'],
     ],
   },
 };
@@ -922,6 +1100,7 @@ const SKILL_PRIORITY = {
   dog:2, tobi:2, mahoraga:2, chimera:2, fly:2,
   reverse:3, blue:3, red:3, purple:3, fire:3, dismantle:3,
   space:3, nue:3, shinuchi:3, sentence:3, heaven:3, chain:3, simpledomain:3,
+  human:2, itai:3, form:3,
   attack:9,
 };
 const skillPriority = s => (SKILL_PRIORITY[s.act] !== undefined ? SKILL_PRIORITY[s.act] : 2);
@@ -934,6 +1113,7 @@ const COST_FIELD = {
   nue:'nueCost', dog:'dogCost', tobi:'tobiCost', mahoraga:'mahoCost', chimera:'chimeraCost', space:'spaceCost',
   shinuchi:'shinuchiCost', sentence:'sentenceCost',
   heaven:'heavenCost', chain:'chainCost', fly:'flyCost', simpledomain:'sdCost',
+  itai:'itaiCost', human:'humanCost', form:'formCost',
 };
 function skillCost(act, type){
   const cfg = CFG[type];
@@ -957,7 +1137,9 @@ function makeSkillBtn(s){
   const btn = document.createElement('button');
   btn.className = 'skill' + (s.cls ? ' ' + s.cls : '');
   btn.dataset.act = s.act;
-  btn.innerHTML = `${s.label}<span class="sub">${s.sub}</span>`;
+  btn.innerHTML = `<span class="lb">${s.label}</span><span class="sub">${s.sub}</span>`;
+  btn._labelEl = btn.querySelector('.lb');
+  btn._baseLabel = s.label;
 
   /* ★ 咒力消耗角标 */
   const cost = skillCost(s.act, player.type);
@@ -1085,6 +1267,7 @@ function renderControls(){
   /* 圆心 = 控制区右下角（拇指自然落点） */
   const cx = boxF, cy = boxF;
   const kScale = boxF / box;
+  let maxX = 0, maxY = 0;              /* ★ 按钮实际外接范围（用于防裁切） */
   const put = (btn, x, y, size) => {
     btn.style.width  = size + 'px';
     btn.style.height = size + 'px';
@@ -1092,6 +1275,8 @@ function renderControls(){
     btn.style.top  = Math.round(y - size/2) + 'px';
     ctrlEl.appendChild(btn);
     btns[btn.dataset.act] = btn;
+    maxX = Math.max(maxX, x + size/2);
+    maxY = Math.max(maxY, y + size/2);
   };
 
   /* ① 从外圈往内圈依次排布（外圈排满 4 个才开始排内圈） */
@@ -1113,6 +1298,13 @@ function renderControls(){
     const ab = Math.round(bsEff * 1.22);
     put(makeSkillBtn(atkBtnCfg), cx - ab/2, cy - ab/2, ab);
   }
+
+  /* ③ ★ 防裁切：错开半格后，位于 180°/270° 附近的按钮中心会落在控制区边缘，
+     半个按钮会超出屏幕。这里把整个操作区按需向内推相应距离即可。 */
+  const padR = Math.max(0, Math.round(maxX - boxF));
+  const padB = Math.max(0, Math.round(maxY - boxF));
+  ctrlEl.style.right  = `max(${10 + padR}px, env(safe-area-inset-right))`;
+  ctrlEl.style.bottom = `max(${12 + padB}px, env(safe-area-inset-bottom))`;
 }
 
 function handleAction(act){
@@ -1151,7 +1343,14 @@ function handleAction(act){
     case 'heaven':     tojiHeavenSpear(player, enemy); break;
     case 'chain':      tojiChain(player, enemy); break;
     case 'fly':        tojiFlyHead(player); break;
-    case 'simpledomain': castSimpleDomain(player); break;
+    case 'itai':       mahitoIdleTransfig(player, enemy); break;
+    case 'human':      mahitoHuman(player); break;
+    case 'form':       mahitoForm(player); break;
+    case 'simpledomain':
+      /* ★ 已展开 → 再按一次「引爆」；未展开 → 正常展开 */
+      if (player.sd) detonateSimpleDomain(player);
+      else castSimpleDomain(player);
+      break;
   }
 }
 
@@ -1327,11 +1526,13 @@ function inOwnHigurumaDomain(f){
   return !!(f && f.domain && f.domain.type === 'higuruma' && dist(f, f.domain) < f.domain.r);
 }
 
-/* 实际移动速度（领域加成 / 追诉加成 / 死刑减速） */
+/* 实际移动速度（领域加成 / 追诉加成 / 死刑减速 / 领域内减速） */
 function moveSpeed(f){
   let spd = f.speed;
   if (f.sentence > 0) spd *= (1 - CFG.higuruma.sentenceSlow);   /* 被宣告死刑：减速 */
   if (f.blueSlow > 0) spd *= (f.blueSlowMul || 1);              /* ★ 被吸附型苍减速 */
+  if (f.domSlow > 0) spd *= (f.domSlowMul || 1);                /* ★ 领域适应后的减速 */
+  if (f.formT > 0) spd *= (CFG[f.type].formSpeedMul || 1);      /* ★ 内体变形：移速 +35% */
   if (f.aiPro) spd *= AI_TUNE.pro.speed;                        /* ★ 熟练人机：移动更快 */
   if (f.type === 'higuruma'){
     if (inOwnHigurumaDomain(f)) spd *= CFG.higuruma.domainSpeedMul;
@@ -1342,7 +1543,7 @@ function moveSpeed(f){
 }
 
 /* 普攻为「贴身近战」的角色（其余角色普攻为远程斩击） */
-const MELEE_TYPES = { gojo: true, higuruma: true, toji: true };
+const MELEE_TYPES = { gojo: true, higuruma: true, toji: true, mahito: true };
 function isMeleeType(type){ return !!MELEE_TYPES[type]; }
 
 function basicAttack(attacker, target){
@@ -1375,6 +1576,9 @@ function basicAttack(attacker, target){
     attacker.attackCd = c.atkCd;
     addEffect({ type:'punch', x:attacker.x, y:attacker.y, ang:attacker.facing, t:0, life:0.16,
       color: isGojo ? '#b4e6ff' : (attacker.type === 'toji' ? '#e6ebf1' : '#ffd76a') });
+    /* ★ 近战普攻音效（五条悟开苍拳时换成苍拳音效） */
+    playSfx(isGojo && attacker.blueFist ? 'blueFist' : 'combat', attacker.type,
+      attacker === player ? 1 : 0.55);
     if (isGojo && attacker.blueFist){
       /* ★ 苍拳冲拳：向前突进 + 能量冲拳特效 */
       const la = attacker.facing;
@@ -1390,7 +1594,7 @@ function basicAttack(attacker, target){
 
     const d = dist(attacker, target);
     if (d <= attacker.r + target.r + c.atkRange){
-      damage(target, dmg);
+      dealDamage(attacker, target, dmg);
       const ang = Math.atan2(target.y-attacker.y, target.x-attacker.x);
       let kb = isBF ? 26 : 12;
       if (isGojo && attacker.blueFist) kb *= c.blueFistKb;
@@ -1413,6 +1617,7 @@ function basicAttack(attacker, target){
     const col = attacker.type === 'sukunaTs' ? '#c9a4ff' : '#ff6b8a';
     spawnSlash(attacker, ang, 0, col);
     addEffect({ type:'punch', x:attacker.x, y:attacker.y, ang, t:0, life:0.16 });
+    playSfx('remote', attacker.type, attacker === player ? 1 : 0.55);   /* ★ 远程普攻音效 */
   }
 }
 
@@ -1481,7 +1686,7 @@ function castDomain(f, target){
     hitOpponent: false,
   };
   const text = '领域展开 · ' + (c.domainName || '');
-  const color = f.type === 'gojo' ? '#c9a4ff' : '#ff5c5c';
+  const color = f.type === 'gojo' ? '#c9a4ff' : (f.type === 'mahito' ? '#8a5ce0' : '#ff5c5c');
   playSfx('domain', f.type, f === player ? 1 : 0.65);         /* ★ 角色专属领域音效（domain1/domain2 随机） */
   playSfx('domainSpawn', f.type, f === player ? 0.8 : 0.5);   /* ★ 通用「领域生成中」音效 */
   addEffect({ type:'text', x:f.x, y:f.y-90, t:0, life:2.4, text, color, size:26 });
@@ -1492,14 +1697,17 @@ function castDomain(f, target){
 /* ══════════════════════════════════════════
    五条悟术式
    ══════════════════════════════════════════ */
-/* ★ 玩家是否正按住「苍」键（键盘 Q / 手机按钮） */
-function blueKeyHeld(){ return !!keys['q'] || blueHoldBtn; }
+/* ★ 是否正在「按住苍」：玩家看按键（键盘 Q / 手机按钮），AI 看 aiChargingBlue */
+function blueKeyHeld(f){
+  if (f && f.aiChargingBlue) return true;
+  return !!keys['q'] || blueHoldBtn;
+}
 
 /* ★ 长按「苍」：把刚刚发射的普通苍升级为「吸附型引力球」
    （点按 = 普通苍；按住 ≥ blueHoldTime = 引力球） */
 function tickBlueCharge(p, dt){
   if (!p) return;
-  if (p.type !== 'gojo' || !blueKeyHeld()){ p.blueCharge = 0; return; }
+  if (p.type !== 'gojo' || !blueKeyHeld(p)){ p.blueCharge = 0; return; }
   p.blueCharge = (p.blueCharge || 0) + dt;
   const c = CFG.gojo;
   if (p.blueCharge < c.blueHoldTime) return;
@@ -1585,7 +1793,7 @@ function purpleBlast(x, y, owner){
   G.flash = Math.max(G.flash, 0.5);
 
   if (foe && foe.alive && Math.hypot(foe.x - x, foe.y - y) < R + foe.r){
-    damage(foe, c.purpleBlastDmg);
+    dealDamage(owner, foe, c.purpleBlastDmg);
     const a = Math.atan2(foe.y - y, foe.x - x);
     foe.kbx = Math.cos(a) * c.purpleBlastKb;
     foe.kby = Math.sin(a) * c.purpleBlastKb;
@@ -1692,6 +1900,7 @@ function tsNue(s, target){
   });
   addEffect({ type:'ring', x:s.x, y:s.y, t:0, life:0.35, r0:8, r1:60, color:'#c9a4ff', width:3 });
   addEffect({ type:'text', x:s.x, y:s.y-58, t:0, life:0.8, text:'鵺', color:'#c9a4ff', size:18 });
+  playSfx('spawn', s.type, s === player ? 1 : 0.55);   /* ★ 召唤式神音效（随机） */
 }
 
 function tsDog(s){
@@ -1725,6 +1934,7 @@ function tsDog(s){
   }
   addEffect({ type:'ring', x:s.x, y:s.y, t:0, life:0.5, r0:10, r1:90, color:'#ff8a3d', width:4 });
   addEffect({ type:'text', x:s.x, y:s.y-58, t:0, life:1.0, text:'玉犬', color:'#ff8a3d', size:20 });
+  playSfx('spawn', s.type, s === player ? 1 : 0.55);   /* ★ 召唤式神音效（随机） */
 }
 
 /* ★ 嵌合兽：体积与魔虚罗相同（r=40）· 攻击逻辑类似玉犬（贴身撕咬）· 橙色底色 */
@@ -1772,6 +1982,7 @@ function tsChimera(s){
   }
   G.shake = Math.max(G.shake, 18);
   G.flash = Math.max(G.flash, 0.32);
+  playSfx('spawn', s.type, s === player ? 1 : 0.55);   /* ★ 召唤式神音效（随机） */
 }
 
 function tsMahoraga(s){
@@ -1807,9 +2018,13 @@ function tsMahoraga(s){
     attackInterval: 1.0,
     angle: facing,
     adapt: {},        /* ★ 适应：伤害来源 → 已适应层数 */
+    domAdapt: { gojo: 0, sukuna: 0 },  /* ★ 在各类领域中累计待过的秒数 */
+    chaseT: 0,        /* ★ 连续追击计时：越追越快 */
+    slowT: 0, slowMul: 1,
     slashAnim: 0,     /* ★ 砍击动作计时 */
   });
   s.mahoSummoned = true;   /* ★ 记录已召唤过魔虚罗（空间斩解锁条件之一） */
+  playSfx('spawn', s.type, s === player ? 1 : 0.55);   /* ★ 召唤式神音效（随机） */
   addEffect({ type:'ring', x:s.x, y:s.y, t:0, life:0.9, r0:20, r1:220, color:'#ffd76a', width:8 });
   addEffect({ type:'text', x:s.x, y:s.y-70, t:0, life:1.6, text:'布瑠部由良由良', color:'#fff3c4', size:22 });
   addEffect({ type:'text', x:s.x, y:s.y-40, t:0, life:1.6, text:'魔虚罗 · 显现', color:'#ffd76a', size:18 });
@@ -1842,6 +2057,7 @@ function tsTobi(s){
   }
   addEffect({ type:'ring', x:s.x, y:s.y, t:0, life:0.4, r0:10, r1:80, color:'#cfd8e6', width:3 });
   addEffect({ type:'text', x:s.x, y:s.y-58, t:0, life:0.9, text:'脱兔', color:'#dfe6f2', size:18 });
+  playSfx('spawn', s.type, s === player ? 1 : 0.55);   /* ★ 召唤式神音效（随机） */
 }
 
 /* ══════════════════════════════════════════
@@ -1918,7 +2134,7 @@ function higurumaShinuchi(s, target){
       const k = i/12;
       const px = fromX + (s.x-fromX)*k, py = fromY + (s.y-fromY)*k;
       if (Math.hypot(px-foe.x, py-foe.y) <= s.r + foe.r + 18){
-        damage(foe, c.shinuchiDmg);
+        dealDamage(s, foe, c.shinuchiDmg);
         foe.kbx = Math.cos(ang)*c.shinuchiKb;
         foe.kby = Math.sin(ang)*c.shinuchiKb;
         G.shake = Math.max(G.shake, 16);
@@ -2123,6 +2339,118 @@ function tojiFlyHead(t){
   addEffect({ type:'text', x:t.x, y:t.y-58, t:0, life:0.9, text:'蝇头', color:'#e8c07a', size:18 });
 }
 
+/* ══════════════════════════════════════════
+   真人术式 —— 无为转变 / 改造人类 / 内体变形 / 灵魂改造
+   ══════════════════════════════════════════ */
+/* ★ 灵魂改造：给目标挂上状态（30 hp/s + 10 咒力/s 流失，外圈紫黑缝合纹） */
+function applySoulAlter(f, dur, quiet){
+  if (!f || !f.alive) return;
+  const before = f.soulAlter || 0;
+  f.soulAlter = Math.max(before, dur);
+  if (quiet) return;
+  addEffect({ type:'text', x:f.x, y:f.y-96, t:0, life:1.4,
+    text:'灵魂改造 ' + dur.toFixed(1) + 's', color:'#c9a4ff', size:16 });
+  addEffect({ type:'ring', x:f.x, y:f.y, t:0, life:0.5, r0:10, r1:f.r+64, color:'#7a4bd6', width:5 });
+}
+
+/* ★ 每帧结算灵魂改造（在 updatePlayer / aiThink 中调用） */
+function tickSoulAlter(f, dt){
+  if (!f || !f.alive || !(f.soulAlter > 0)) return;
+  const c = CFG.mahito;
+  f.soulAlter -= dt;
+  /* 直接扣血：不受领域加成/减伤等二次修正影响，纯状态伤害 */
+  f.hp -= c.soulDps * dt;
+  f.ce = Math.max(0, f.ce - c.soulCeDrain * dt);
+  if (Math.random() < 0.22){
+    addEffect({ type:'spark', x:f.x+rnd(-18,18), y:f.y+rnd(-18,18), t:0, life:rnd(.3,.6),
+      vx:rnd(-40,40), vy:rnd(-70,-20), color:'#8a5ce0', size:rnd(2,4) });
+  }
+  if (f.hp <= 0){
+    f.hp = 0; f.alive = false;
+    if (f === player) endGame('lose'); else endGame('win');
+    updateHUD();
+  }
+}
+
+/* ★ 无为转变（双用）：
+   前方伸出变形触手，触及约 150；命中敌人 → 6 秒灵魂改造；
+   未命中 → 触手折回自身，修复灵魂并回复 200 生命 */
+function mahitoIdleTransfig(s, target){
+  const c = CFG.mahito;
+  if (!s || !s.alive || s.stun > 0 || s.cd.itai > 0 || s.ce < c.itaiCost) return;
+  const aim = target || (s === player ? enemy : player);
+  if (!aim || !aim.alive) return;
+
+  s.ce -= c.itaiCost;
+  s.cd.itai = c.itaiCd;
+  const ang = Math.atan2(aim.y - s.y, aim.x - s.x);
+  s.facing = ang;
+
+  const reach = c.itaiReach;
+  const hit = dist(s, aim) <= reach + aim.r;
+  addEffect({ type:'tentacle', x:s.x, y:s.y, ang, len:reach + 26, t:0,
+    life: hit ? 0.45 : 0.75, color:'#e2e6ea', color2:'#3d5570', hit });
+
+  if (hit){
+    applySoulAlter(aim, c.itaiDur);
+    addEffect({ type:'ring', x:aim.x, y:aim.y, t:0, life:0.45,
+      r0:8, r1: aim.r + 72, color:'#8a5ce0', width:6 });
+    G.shake = Math.max(G.shake, 12);
+  } else {
+    /* 未命中 → 转向自己：修补灵魂并回血 */
+    const before = s.hp;
+    s.hp = Math.min(s.maxHp, s.hp + c.itaiHeal);
+    addEffect({ type:'heal', x:s.x, y:s.y, t:0, life:0.9, color:'#c9a4ff' });
+    addEffect({ type:'text', x:s.x, y:s.y-62, t:0, life:1.2,
+      text:'无为转变 · 反噬自身 +' + Math.round(s.hp-before), color:'#c9a4ff', size:16 });
+    updateHUD();
+  }
+}
+
+/* ★ 改造人类：扇形掷出 3 只改造人（自动追击并撕打敌人） */
+function mahitoHuman(s){
+  const c = CFG.mahito;
+  if (!s || !s.alive || s.stun > 0 || s.cd.human > 0 || s.ce < c.humanCost) return;
+  s.ce -= c.humanCost;
+  s.cd.human = c.humanCd;
+
+  const facing = finite(s.facing) ? s.facing : 0;
+  for (let i = 0; i < c.humanCount; i++){
+    const a = facing + (i - (c.humanCount - 1) / 2) * 0.42 + rnd(-0.08, 0.08);
+    summons.push({
+      type: 'mutant',
+      owner: s,
+      x: s.x + Math.cos(a) * 46,
+      y: s.y + Math.sin(a) * 46,
+      r: 14,
+      speed: c.humanSpeed,
+      life: c.humanDur, maxLife: c.humanDur,
+      hp: c.humanHp, maxHp: c.humanHp,
+      damage: c.humanDmg,
+      hitCd: 0, hitFlash: 0,
+      attackInterval: c.humanAtkInterval,
+      angle: a,
+      mutantPhase: 0,
+    });
+  }
+  addEffect({ type:'ring', x:s.x, y:s.y, t:0, life:0.5, r0:10, r1:104, color:'#3d5570', width:4 });
+  addEffect({ type:'text', x:s.x, y:s.y-58, t:0, life:1.0, text:'改造人类', color:'#e2e6ea', size:20 });
+}
+
+/* ★ 内体变形：2.5 秒内免疫所有投射物，移速 +35%、攻击力 +25%
+   （唯一的例外：天逆鉾无视变形并强制打断，见 updateProjectiles） */
+function mahitoForm(s){
+  const c = CFG.mahito;
+  if (!s || !s.alive || s.stun > 0 || s.cd.form > 0 || s.ce < c.formCost) return;
+  s.ce -= c.formCost;
+  s.cd.form = c.formCd;
+  s.formT = c.formDur;
+  s.formAtk = c.formAtkMul;
+  addEffect({ type:'ring', x:s.x, y:s.y, t:0, life:0.5, r0:12, r1:124, color:'#3d5570', width:6 });
+  addEffect({ type:'text', x:s.x, y:s.y-74, t:0, life:1.4, text:'内体变形', color:'#e2e6ea', size:20 });
+  G.shake = Math.max(G.shake, 10);
+}
+
 /* ★ 拖拽结算：把目标沿直线拉向施法者（在双方位移之后调用） */
 function applyPull(f, dt){
   if (!f || !f.alive || !f.pull) return;
@@ -2145,6 +2473,28 @@ function applyPull(f, dt){
 /* ══════════════════════════════════════════
    伤害
    ══════════════════════════════════════════ */
+/* ★ 自己领域内的攻击力加成（各角色倍率不同） */
+function domainAtkMul(f){
+  if (!f || !f.domain) return 1;
+  const c = CFG[f.type];
+  if (!c || !finite(c.domainAtkBuff)) return 1;
+  if (dist(f, f.domain) >= f.domain.r) return 1;
+  return c.domainAtkBuff;
+}
+
+/* ★ 最终攻击力倍率 = 领域加成 × 内体变形等主动增益 */
+function atkMul(f){
+  if (!f) return 1;
+  let m = domainAtkMul(f);
+  if (f.formT > 0) m *= (f.formAtk || 1);      /* 内体变形：攻击力 +25% */
+  return m;
+}
+
+/* ★ 统一伤害入口：把「攻击方的领域攻击力加成」算进去后再结算 */
+function dealDamage(src, target, amount, silent){
+  return damage(target, amount * (src ? atkMul(src) : 1), silent);
+}
+
 function damage(target, amount, silent){
   if (!target || !target.alive) return;
   let d = amount;
@@ -2155,6 +2505,8 @@ function damage(target, amount, silent){
   if (target.sentence > 0) d *= (1 + CFG.higuruma.sentenceAmp);
   /* ★ 诛伏赐死：领域内自身受到的伤害 -30% */
   if (target.type === 'higuruma' && inOwnHigurumaDomain(target)) d *= (1 - CFG.higuruma.domainDR);
+  /* ★ 从陨落的魔虚罗处继承的适应：自适应减伤 */
+  if (finite(target.adaptDR) && target.adaptDR > 0) d *= (1 - clamp(target.adaptDR, 0, 0.9));
   target.hp -= d;
   target.hitFlash = 0.14;
 
@@ -2189,8 +2541,9 @@ function damageSummon(s, amount, srcType, silent){
   const key = srcType || 'unknown';
   if (s.sentence > 0) d *= (1 + CFG.higuruma.sentenceAmp);   /* ★ 死刑标记 */
 
-  /* ★ 魔虚罗：同一能力每命中一次，就对该能力多一层减伤 */
-  if (s.type === 'mahoraga'){
+  /* ★ 魔虚罗：同一能力每命中一次，就对该能力多一层减伤
+     （领域伤害不在此处理，改为「在领域内待够多久」的时间适应） */
+  if (s.type === 'mahoraga' && key !== 'domain'){
     if (!s.adapt) s.adapt = {};
     const stacks = s.adapt[key] || 0;
     const c = CFG.sukunaTs;
@@ -2198,6 +2551,8 @@ function damageSummon(s, amount, srcType, silent){
     d *= (1 - dr);
     s.adapt[key] = stacks + 1;
     if (stacks === 0){
+      /* ★ 适应触发音效 */
+      playSfx('mahoragaAdapt', s.owner ? s.owner.type : 'sukunaTs', s.owner === player ? 1 : 0.5);
       addEffect({ type:'text', x:s.x, y:s.y - s.r - 30, t:0, life:1.3,
         text:'适应 · ' + (ADAPT_LABELS[key] || '能力'), color:'#ffd76a', size:13 });
     }
@@ -2233,6 +2588,7 @@ function endGame(result){
       t.textContent = '胜 利';
       t.style.color = '#eef2f6';
       s.textContent = '「天上天下，唯我独尊。」';
+      playSfx('victory', player ? player.type : 'gojo', 1);   /* ★ 人机对战胜利音效 */
     } else {
       t.textContent = '败 北';
       t.style.color = '#ff6b6b';
@@ -2327,12 +2683,28 @@ function updatePlayer(dt){
   if (p.skillLock > 0) p.skillLock -= dt;
   if (p.sentence > 0) p.sentence -= dt;
   if (p.blueSlow > 0) p.blueSlow -= dt;
-  for (const k in p.cd) if (p.cd[k] > 0) p.cd[k] = Math.max(0, p.cd[k] - dt);
+  if (p.domSlow > 0) p.domSlow -= dt;  for (const k in p.cd) if (p.cd[k] > 0) p.cd[k] = Math.max(0, p.cd[k] - dt);
   if (p.attackCd > 0) p.attackCd -= dt;
 
   tickBrainBleed(p, dt);
   tickSimpleDomain(p, dt);
+  tickSoulAlter(p, dt);          /* ★ 灵魂改造：持续扣血 + 流失咒力 */
+  if (p.formT > 0) p.formT -= dt; /* ★ 内体变形计时 */
   if (!p.alive) return;
+
+  /* ★ 自动防御（设置里可关）：
+     ① 五条悟：咒力充足时自动维持「无下限」；
+     ② 被敌方领域笼罩且自身无保护 → 自动展开「简易领域 / 弥虚葛笼」 */
+  if (AUTO_DEF && p.stun <= 0){
+    if (p.type === 'gojo' && !p.infinity && p.ce > p.maxCe * 0.55) p.infinity = true;
+    /* ★ 已展开且咒力快被抗衡抽干 → 自动收束引爆（避免被打碎浪费冷却） */
+    if (p.sd && p.sd.t >= 0.35 && p.sd.t < p.sd.dur && (p.ce - c.sdCost) < SD_TUNE.drain * 0.9)
+      detonateSimpleDomain(p);
+    else if (enemy && enemy.domain && !p.sd && p.cd.sd <= 0 && p.skillLock <= 0 &&
+        finite(c.sdCost) && p.ce >= c.sdCost &&
+        dist(p, enemy.domain) < enemy.domain.r + 40)
+      castSimpleDomain(p);
+  }
 
   let mx = 0, my = 0;
   if (keys['w'] || keys['arrowup'])    my -= 1;
@@ -2385,19 +2757,30 @@ function updatePlayer(dt){
 function aiThink(dt, ai, target){
   if (!ai || !ai.alive) return;
   const c = CFG[ai.type];
+  const tune = aiTune(ai);
 
   if (ai.hitFlash > 0) ai.hitFlash -= dt;
   if (ai.domainLock > 0) ai.domainLock -= dt;
   if (ai.skillLock > 0) ai.skillLock -= dt;
   if (ai.sentence > 0) ai.sentence -= dt;
   if (ai.blueSlow > 0) ai.blueSlow -= dt;
+  if (ai.domSlow > 0) ai.domSlow -= dt;
   for (const k in ai.cd) if (ai.cd[k] > 0) ai.cd[k] = Math.max(0, ai.cd[k] - dt);
   if (ai.attackCd > 0) ai.attackCd -= dt;
   ai.ce = Math.min(ai.maxCe, ai.ce + c.ceRegen*dt);
 
   tickBrainBleed(ai, dt);
   tickSimpleDomain(ai, dt);
+  tickSoulAlter(ai, dt);          /* ★ 灵魂改造：持续扣血 + 流失咒力 */
+  if (ai.formT > 0) ai.formT -= dt; /* ★ 内体变形计时 */
   if (!ai.alive) return;
+
+  /* ★ 是五条悟就不时模拟「长按 Q」，把苍升级成吸附型引力球 */
+  if (ai.type === 'gojo'){
+    if (ai.chargeBlueT > 0){ ai.chargeBlueT -= dt; ai.aiChargingBlue = true; }
+    else ai.aiChargingBlue = false;
+    tickBlueCharge(ai, dt);
+  }
 
   if (Math.abs(ai.kbx) > 1 || Math.abs(ai.kby) > 1){
     ai.x = clamp(ai.x + ai.kbx*dt, ai.r, WORLD.w - ai.r);
@@ -2425,7 +2808,6 @@ function aiThink(dt, ai, target){
     mv = aiMoveOnly(ai, target, d, ang);
   } else {
     /* ① 保命优先：大脑受损 / 残血时先修反转术式 */
-    const tune = aiTune(ai);
     const lowHp = hasReverse(ai.type) && ai.hp < ai.maxHp * c.reverseThreshold * tune.healAt;
     if ((ai.brainDamaged || lowHp) && ai.cd.reverse <= 0 && ai.ce >= c.reverseCost) castReverse(ai);
 
@@ -2447,14 +2829,59 @@ function aiThink(dt, ai, target){
     else if (ai.type === 'sukuna') mv = aiSukuna(ai, target, d, ang);
     else if (ai.type === 'higuruma') mv = aiHiguruma(ai, target, d, ang);
     else if (ai.type === 'toji') mv = aiToji(ai, target, d, ang);
+    else if (ai.type === 'mahito') mv = aiMahito(ai, target, d, ang);
     else mv = aiSukunaTs(ai, target, d, ang);
   }
 
-  /* ④ 叠加闪避：躲开直射向自己的飞行道具 */
+  /* ★ 弥虚葛笼 / 简易领域：什么时候收束成冲击波——
+     先得握住 0.35s（否则刚展开就会同帧引爆），然后：
+     ① 敌人在冲击范围内且蓄势 ≥ 2 层（打得痛）；
+     ② 咒力快被抗衡抽干（与其碎裂不如主动引爆）；
+     ③ 快要到时（最后一击） */
+  if (ai.sd && ai.sd.t >= 0.35 && ai.sd.t < ai.sd.dur){
+    const foeIn = !!(target && target.alive && dist(ai, target) < SD_TUNE.burstR + target.r);
+    const lowCe = (ai.ce - c.sdCost) < SD_TUNE.drain * 0.9;
+    const fading = ai.sd.t > ai.sd.dur - 0.3;
+    if ((foeIn && ai.sd.charge >= 2) || lowCe || (foeIn && fading)) detonateSimpleDomain(ai);
+  }
+
+  /* ★ 近战 AI：被敌方式神围住时先用普攻把它们清掉（否则永远打不到本体） */
+  if (isMeleeType(ai.type) && ai.attackCd <= 0 && target && target.alive){
+    const cM = CFG[ai.type];
+    const reach = ai.r + cM.atkRange;
+    let near = 0;
+    for (const sm of summons){
+      if (!sm || sm.owner !== target || sm.hp <= 0) continue;
+      if (!finite(sm.x) || !finite(sm.y)) continue;
+      if (dist(ai, sm) <= reach + sm.r) near++;
+    }
+    const canHitBody = d <= reach + target.r;
+    /* 本来够不到本体，或已被两只以上贴身 → 这拳用来清场 */
+    if (near > 0 && (!canHitBody || near >= 2)) basicAttack(ai, target);
+  }
+
+  /* ④ 熟练人机：利用远程优势 —— 对近战敌人保持「风筝」距离，边退边打 */
+  if (tune.kite > 0 && !isMeleeType(ai.type) && isMeleeType(target.type) && d < tune.kite){
+    const w = clamp((tune.kite - d) / tune.kite, 0, 1);
+    let ax = -Math.cos(ang), ay = -Math.sin(ang);      /* 背向目标 */
+    const probe = 130;
+    if (ai.x + ax*probe < ai.r || ai.x + ax*probe > WORLD.w - ai.r ||
+        ai.y + ay*probe < ai.r || ai.y + ay*probe > WORLD.h - ai.r){
+      /* 贴墙：改成沿场地切向绕行，别把自己逼进角落 */
+      const tang = ang + Math.PI + (ai.x < WORLD.w/2 ? -0.95 : 0.95);
+      ax = Math.cos(tang); ay = Math.sin(tang);
+    }
+    const k = 1.8 + w;                                  /* 越近拉得越坚决 */
+    mv.x += ax * k;
+    mv.y += ay * k;
+  }
+
+  /* ⑤ 叠加闪避：躲开直射向自己的飞行道具（熟练人机会全力侧闪） */
   const dodgeAng = aiDodge(ai, dt);
   if (dodgeAng !== null){
-    mv.x = mv.x * 0.3 + Math.cos(dodgeAng);
-    mv.y = mv.y * 0.3 + Math.sin(dodgeAng);
+    const w = tune.dodgeHold > 0 ? 2.0 : 1.0;
+    mv.x = mv.x * 0.25 + Math.cos(dodgeAng) * w;
+    mv.y = mv.y * 0.25 + Math.sin(dodgeAng) * w;
   }
 
   const kbFactor = (Math.abs(ai.kbx) + Math.abs(ai.kby)) > 80 ? 0.15 : 1;
@@ -2467,27 +2894,64 @@ function aiThink(dt, ai, target){
   }
 }
 
-/* 闪避检测：返回垂直于威胁投射物的方向；无威胁返回 null */
+/* ★ 闪避检测（重写）
+   —— 旧版只看「投射物方向锥角」，且每帧重新随机左右，结果就是原地小幅抖动、根本躲不开。
+   —— 新版：① 用弹道做提前量预测，只有「真的会命中自己」才闪；
+              ② 侧向固定选「远离弹道」的一侧；③ 把闪避方向锁定 dodgeHold 秒，
+                 锁定期间不再重算，配合更高的闪避权重才真的能脱离弹道。 */
 function aiDodge(ai, dt){
   const tune = aiTune(ai);
-  let threat = null, bestD = 1e9;
+  const hold = tune.dodgeHold || 0;
+
+  /* 已锁定闪避方向 → 沿同一方向继续侧闪 */
+  if (hold > 0 && ai.dodgeT > 0){
+    ai.dodgeT -= dt;
+    if (ai.dodgeT > 0) return ai.dodgeAng;
+  }
+
+  let threat = null, bestT = 1e9;
   for (const pr of projectiles){
-    if (!pr || pr.owner === ai) continue;
-    if (pr.type === 'blue') continue;              /* 苍是吸附效果，闪避无意义 */
+    if (!pr || pr.dead || pr.owner === ai) continue;
+    if (pr.type === 'blue') continue;              /* 苍是吸附效果，躲了也没用 */
     const vx = pr.vx || 0, vy = pr.vy || 0;
     const sp = Math.hypot(vx, vy);
-    if (sp < 1) continue;
-    const dir = Math.atan2(vy, vx);
-    const toAi = Math.atan2(ai.y - pr.y, ai.x - pr.x);
-    let diff = toAi - dir;
-    while (diff > Math.PI) diff -= TAU;
-    while (diff < -Math.PI) diff += TAU;
-    const dd = dist(pr, ai);
-    if (Math.abs(diff) < tune.dodgeCone && dd < tune.dodgeR && dd < bestD){ threat = pr; bestD = dd; }
+    if (sp < 60) continue;
+    if (dist(pr, ai) > tune.dodgeR) continue;
+
+    const ux = vx/sp, uy = vy/sp;
+    const rx = ai.x - pr.x, ry = ai.y - pr.y;
+    const along = rx*ux + ry*uy;                   /* 沿弹道方向的距离 */
+    if (along < 0) continue;                       /* 已经飞过去了 */
+    const lat = Math.abs(rx*(-uy) + ry*ux);        /* 与弹道的垂直偏移 */
+    const clear = ai.r + (pr.r || 14) + 12;
+    if (lat > clear) continue;                     /* 本来就打不中，不要乱动 */
+    const tt = along / sp;                         /* 命中剩余时间 */
+    if (tt > tune.dodgeWin) continue;               /* 还太远，反应窗口外 */
+    if (tt < bestT){ bestT = tt; threat = pr; }
   }
-  if (!threat) return null;
-  const dir = Math.atan2(threat.vy || 0, threat.vx || 0);
-  return dir + (Math.random() < 0.5 ? Math.PI/2 : -Math.PI/2);
+
+  if (!threat){ ai.dodgeT = 0; return null; }
+
+  const sp = Math.hypot(threat.vx || 0, threat.vy || 0) || 1;
+  const ux = (threat.vx || 0)/sp, uy = (threat.vy || 0)/sp;
+  let nx = -uy, ny = ux;                           /* 垂直弹道方向 */
+  const rx = ai.x - threat.x, ry = ai.y - threat.y;
+  if (rx*nx + ry*ny < 0){ nx = -nx; ny = -ny; }    /* 选远离弹道的那一侧 */
+  let ang = Math.atan2(ny, nx);
+
+  /* 贴墙时改成朝场地内侧躲，避免自己钻进角落 */
+  const probe = ai.r + 120;
+  const px = ai.x + nx*probe, py = ai.y + ny*probe;
+  if (px < ai.r || px > WORLD.w - ai.r || py < ai.r || py > WORLD.h - ai.r){
+    let d = Math.atan2(WORLD.h/2 - ai.y, WORLD.w/2 - ai.x) - ang;
+    while (d > Math.PI) d -= TAU;
+    while (d < -Math.PI) d += TAU;
+    ang += (d > 0 ? 1 : -1) * Math.PI/2;
+  }
+
+  ai.dodgeAng = ang;
+  ai.dodgeT = hold;
+  return ang;
 }
 
 /* ★ 五条悟：中远距离压制 · 苍→赫→茈连招 · 无下限防守 · 抓僵直贴身爆发 */
@@ -2517,13 +2981,43 @@ function aiGojo(ai, target, d, ang){
 
   /* 僵直贴脸时不用「赫」，避免把到手的猎物击飞出近身范围 */
   const avoidRed = punish && d < 220;
-  if (!avoidRed && !ai.redUsed && ai.cd.red <= 0 && ai.ce >= c.redCost + tune.reserve && d < 470 && aiChance(ai, 0.7))
-    gojoRed(ai, target);
 
-  /* 苍：把对手吸进拳头范围（僵直时更积极） */
-  if (!ai.blueUsed && ai.cd.blue <= 0 && ai.ce >= c.blueCost + tune.reserve &&
-      (punish ? d > 60 : d > 130) && aiChance(ai, punish ? 0.9 : 0.7))
-    gojoBlue(ai, target);
+  /* ★ 吸附型苍 + 引力共鸣（normal / pro 都会用，可用 AI_TUNE.charge 关闭）：
+     五条悟 AI 会「长按」苍，把它升级为滞空的吸附型引力球；
+     球还在场上时立刻接「赫」—— 两股力量相撞 → 引力共鸣 → 大范围茈。 */
+  if (tune.charge){
+    let orb = null;
+    for (const pr of projectiles){
+      if (pr && !pr.dead && pr.type === 'blue' && pr.charged && pr.owner === ai){ orb = pr; break; }
+    }
+    if (orb){
+      /* 引力球已成型：赫尽快出手，尽快触发共鸣 */
+      if (!avoidRed && ai.cd.red <= 0 && ai.ce >= c.redCost + tune.reserve && d < 620 &&
+          aiChance(ai, 0.95))
+        gojoRed(ai, target);
+    } else {
+      /* 单发赫（尚未蓄力时的常规输出）；蓄力中不要重复按苍 */
+      if (!avoidRed && !ai.redUsed && !ai.aiChargingBlue && ai.cd.red <= 0 &&
+          ai.ce >= c.redCost + tune.reserve && d < 470 && aiChance(ai, 0.7))
+        gojoRed(ai, target);
+
+      if (!ai.blueUsed && !ai.aiChargingBlue && ai.cd.blue <= 0 &&
+          ai.ce >= c.blueCost + tune.reserve && (punish ? d > 60 : d > 140) &&
+          aiChance(ai, punish ? 0.9 : 0.8)){
+        gojoBlue(ai, target);
+        ai.chargeBlueT = 0.62;      /* 模拟「长按」：把苍升级成吸附型引力球 */
+      }
+    }
+  } else {
+    if (!avoidRed && !ai.redUsed && ai.cd.red <= 0 && ai.ce >= c.redCost + tune.reserve &&
+        d < 470 && aiChance(ai, 0.7))
+      gojoRed(ai, target);
+
+    /* 苍：把对手吸进拳头范围（僵直时更积极） */
+    if (!ai.blueUsed && ai.cd.blue <= 0 && ai.ce >= c.blueCost + tune.reserve &&
+        (punish ? d > 60 : d > 130) && aiChance(ai, punish ? 0.9 : 0.7))
+      gojoBlue(ai, target);
+  }
 
   /* 苍拳：僵直时咒力够就开，并全力贴身输出 */
   ai.blueFist = punish ? ai.ce > 26 : ai.ce > ai.maxCe * 0.6;
@@ -2622,6 +3116,63 @@ function aiSukunaTs(ai, target, d, ang){
            y: Math.sin(ang)*m + Math.sin(ang+Math.PI/2)*strafe };
 }
 
+/* ★ 真人：近身变形拳压制 · 无为转变（近身强制灵魂改造 / 未命中则回血）
+      · 改造人类堆场 · 内体变形免疫投射物 · 自闭圆顿裹 */
+function aiMahito(ai, target, d, ang){
+  const c = CFG.mahito;
+  const tune = aiTune(ai);
+
+  let myMutants = 0;
+  for (const s of summons){
+    if (s && s.owner === ai && s.type === 'mutant' && s.hp > 0) myMutants++;
+  }
+  const lowHp = ai.hp < ai.maxHp * 0.5;
+
+  /* ① 无为转变：触及内必中 → 强制 6s 灵魂改造；血量偏低时远距离抛空回血 */
+  if (ai.cd.itai <= 0 && ai.ce >= c.itaiCost){
+    const inReach = d <= c.itaiReach + target.r;
+    if (inReach){
+      mahitoIdleTransfig(ai, target);
+    } else if (lowHp && d > c.itaiReach + 80 && aiChance(ai, 0.8)){
+      mahitoIdleTransfig(ai, target);      /* 未命中 → 转向自己回复 200hp */
+    }
+  }
+
+  /* ② 改造人类：扇形撒出 3 只改造人拿捏场面 */
+  if (myMutants < c.humanCount && ai.cd.human <= 0 && ai.ce >= c.humanCost &&
+      (d < 560 || lowHp) && aiChance(ai, 0.85))
+    mahitoHuman(ai);
+
+  /* ③ 内体变形：有飞行道具逼近或中距离对拼时开，免疫投射手并提速 */
+  if (ai.cd.form <= 0 && ai.ce >= c.formCost && ai.formT <= 0){
+    let threat = false;
+    for (const pr of projectiles){
+      if (!pr || pr.dead || pr.owner === ai) continue;
+      if (pr.type === 'heaven') continue;      /* 天逆鉾无视变形，不如不做 */
+      if (dist(pr, ai) < 260) { threat = true; break; }
+    }
+    if (threat || (d < 420 && d > 140) || lowHp) mahitoForm(ai);
+  }
+
+  /* ④ 领域：自闭圆顿裹 → 对敌人持续施加 3s 灵魂改造 */
+  if (ai.cd.domain <= 0 && ai.ce >= c.domainCost && !ai.domain && !target.domain &&
+      (d < tune.domD + 40 || target.hp < target.maxHp*tune.domHp))
+    castDomain(ai, target);
+
+  /* ⑤ 变形拳：触及长，边追边敲 */
+  if (ai.attackCd <= 0 && d < ai.r + target.r + c.atkRange)
+    basicAttack(ai, target);
+
+  /* 走位：近身逼战（触及 152），偶尔横向拉一下避开硬拼 */
+  let m;
+  if (d > 190) m = 1;
+  else if (d < 110) m = -0.15;
+  else m = 0.28;
+  const strafe = Math.sin(G.time*2.1 + 2.2) * 0.55;
+  return { x: Math.cos(ang)*m + Math.cos(ang+Math.PI/2)*strafe,
+           y: Math.sin(ang)*m + Math.sin(ang+Math.PI/2)*strafe };
+}
+
 /* ══════════════════════════════════════════
    投射物
    ══════════════════════════════════════════ */
@@ -2654,9 +3205,14 @@ function spawnBurst(x, y, color, n, spdMin, spdMax, sizeMin, sizeMax){
   }
 }
 
+/* ★ 内体变形：免疫所有投射物。
+   唯一的例外是「天逆鉾」—— 它无视变形，还会强制打断变形状态（见下方命中分支）。 */
+function formBlocksProjectile(target, pr){
+  return !!(target && target.alive && target.formT > 0 && pr && pr.type !== 'heaven');
+}
+
 /* 命中敌方式神则返回该式神（飞行道具会被式神挡下） */
-function projectileHitsSummon(pr){
-  const foe = pr.owner === player ? enemy : player;
+function projectileHitsSummon(pr){const foe = pr.owner === player ? enemy : player;
   if (!foe) return null;
   for (const s of summons){
     if (!s || s.owner !== foe) continue;
@@ -2727,9 +3283,10 @@ function updateProjectiles(dt){
         pr.hitCd = (pr.hitCd || 0) - dt;
         if (pr.hitCd <= 0){ pr.hitCd = 0.45; damageSummon(blueSummon, pr.damage, pr.type); }
       }
-      if (target && target.alive && Math.hypot(pr.x - target.x, pr.y - target.y) < pr.r + target.r + 6){
+      if (target && target.alive && !formBlocksProjectile(target, pr) &&
+          Math.hypot(pr.x - target.x, pr.y - target.y) < pr.r + target.r + 6){
         pr.hitCd = (pr.hitCd || 0) - dt;
-        if (pr.hitCd <= 0){ pr.hitCd = 0.45; damage(target, pr.damage); }
+        if (pr.hitCd <= 0){ pr.hitCd = 0.45; dealDamage(owner, target, pr.damage); }
       }
       if (pr.life <= 0){
         addEffect({ type:'ring', x:pr.x, y:pr.y, t:0, life:pr.charged?0.55:0.35,
@@ -2773,7 +3330,7 @@ function updateProjectiles(dt){
         continue;
       }
       if (target && target.alive && dist(pr, target) < pr.r + target.r){
-        damage(target, pr.damage);
+        dealDamage(pr.owner, target, pr.damage);
         addEffect({ type:'ring', x:pr.x, y:pr.y, t:0, life:0.5, r0:8, r1:110, color:'#c9a4ff', width:5 });
         spawnBurst(pr.x, pr.y, '#d0aaff', 12, 80, 340, 2, 5);
         projectiles.splice(i,1);
@@ -2840,15 +3397,34 @@ function updateProjectiles(dt){
     }
 
     if (target && target.alive && dist(pr, target) < pr.r + target.r){
-      damage(target, pr.damage);
+      /* ★ 内体变形：直接把投射物吃掉（天逆鉾除外，见下） */
+      if (formBlocksProjectile(target, pr)){
+        addEffect({ type:'ring', x:pr.x, y:pr.y, t:0, life:0.3,
+          r0:6, r1: pr.r*2.2, color:'#3d5570', width:4 });
+        addEffect({ type:'text', x:target.x, y:target.y-58, t:0, life:0.7,
+          text:'变形 · 无效', color:'#cfd8e2', size:13 });
+        projectiles.splice(i,1);
+        continue;
+      }
+      dealDamage(pr.owner, target, pr.damage);
       const a = Math.atan2(target.y - pr.y, target.x - pr.x);
 
-      /* ★ 天逆鉾：命中后 5 秒内无法使用术式与领域 */
+      /* ★ 天逆鉾：命中后 5 秒内无法使用术式与领域；
+         并且无视「内体变形」、强制把变形打断 */
       if (pr.type === 'heaven'){
         const seal = pr.seal || 5;
         target.skillLock = Math.max(target.skillLock || 0, seal);
         target.infinity = false;
         target.blueFist = false;
+        if (target.formT > 0){
+          target.formT = 0;
+          playSfx('domainBreak', target.type, 0.5);
+          addEffect({ type:'text', x:target.x, y:target.y-96, t:0, life:1.7,
+            text:'天逆鉾 · 变形被强制打断', color:'#ffffff', size:16 });
+          addEffect({ type:'ring', x:target.x, y:target.y, t:0, life:0.6,
+            r0:10, r1:160, color:'#eef2f6', width:6 });
+          G.flash = Math.max(G.flash, 0.35);
+        }
         addEffect({ type:'text', x:target.x, y:target.y-74, t:0, life:1.4,
           text:'天逆鉾 · 术式封印 ' + seal + 's', color:'#ffffff', size:16 });
         G.shake = Math.max(G.shake, 14);
@@ -2920,7 +3496,9 @@ function updateSummons(dt){
     if (s.slashAnim > 0) s.slashAnim -= dt;
     if (s.biteAnim > 0) s.biteAnim -= dt;
     if (s.chimeraPhase !== undefined) s.chimeraPhase += dt;
+    if (s.mutantPhase !== undefined) s.mutantPhase += dt;
     if (s.stun > 0) s.stun -= dt;
+    if (s.slowT > 0) s.slowT -= dt;            /* ★ 领域减速剩余时间 */
     if (s.sentence > 0) s.sentence -= dt;
 
     if (!s.noExpire) s.life -= dt;
@@ -2945,8 +3523,23 @@ function updateSummons(dt){
     /* ★ 碰撞体积：贴到接触距离即停下，不与目标重叠 */
     const contact = s.r + target.r + 4;
     const d = dist(s, target);
+
+    /* ★ 实际速度：领域减速 × 魔虚罗的「追击提速」
+       （不改基础速度，而是连续追得越久跑得越快，停下或打到人后回落） */
+    let spd = s.speed || 200;
+    if (s.slowT > 0) spd *= (s.slowMul || 1);
+    if (s.type === 'mahoraga'){
+      const c2 = CFG.sukunaTs;
+      if (d > contact + 6){
+        s.chaseT = (s.chaseT || 0) + dt;
+      } else {
+        s.chaseT = Math.max(0, (s.chaseT || 0) - dt*4);
+      }
+      spd *= 1 + Math.min(c2.mahoChaseMax, (s.chaseT || 0) * c2.mahoChaseAdd);
+    }
+
     if (d > contact){
-      const move = Math.min((s.speed || 200) * dt, d - contact);
+      const move = Math.min(spd * dt, d - contact);
       s.x += Math.cos(ang) * move;
       s.y += Math.sin(ang) * move;
     } else if (d > 0.001){
@@ -2981,10 +3574,17 @@ function updateSummons(dt){
         s.hitCd = s.attackInterval || 0.5;
         const isMaho = s.type === 'mahoraga';
         const isChimera = s.type === 'chimera';
-        const col = isMaho ? '#ffd76a' : (isChimera ? '#ffa32e' : '#ff8a3d');
+        const isMutant = s.type === 'mutant';
+        const col = isMaho ? '#ffd76a' : (isChimera ? '#ffa32e' : (isMutant ? '#3d5570' : '#ff8a3d'));
         if (isMaho) s.slashAnim = 0.22;   /* 魔虚罗：砍击动作 */
         if (isChimera) s.biteAnim = 0.26; /* 嵌合兽：撕咬动作 */
-        damage(target, s.damage || 20);
+        if (isMutant) s.biteAnim = 0.26;  /* 改造人：抽打动作 */
+        /* ★ 式神攻击音效 */
+        if (isMaho || isChimera){
+          playSfx(isMaho ? 'mahoragaAtk' : 'chimeraAtk',
+            s.owner ? s.owner.type : 'sukunaTs', s.owner === player ? 1 : 0.5);
+        }
+        dealDamage(s.owner, target, s.damage || 20);
 
         addEffect({ type:'ring', x:target.x, y:target.y, t:0, life:0.3,
           r0:6, r1:(s.r||16)*2.2, color:col, width:3.5 });
@@ -3029,12 +3629,13 @@ function removeSummon(i, s){
     } else {
       addEffect({ type:'ring', x:s.x, y:s.y, t:0, life:0.4,
         r0:4, r1:(s.r||16)*2.4,
-        color: s.type === 'tobi' ? '#dfe6f2' : (s.type === 'flyhead' ? '#d8a24a' : '#ff8a3d'),
+        color: s.type === 'mutant' ? '#3d5570'
+          : (s.type === 'tobi' ? '#dfe6f2' : (s.type === 'flyhead' ? '#d8a24a' : '#ff8a3d')),
         width:3 });
     }
   }
 
-  /* 魔虚罗已召唤且已战死（血量耗尽）→ 解锁空间斩 */
+  /* ★ 魔虚罗已召唤且已战死（血量耗尽）→ 解锁空间斩，并把适应成果转给十影宿傩 */
   if (killed && s.type === 'mahoraga' && s.owner && s.owner.alive && !s.owner.spaceUnlocked){
     s.owner.mahoDied = true;
     s.owner.spaceUnlocked = true;
@@ -3042,6 +3643,25 @@ function removeSummon(i, s){
       text:'空间斩 · 解锁（F）', color:'#fff0b0', size:18 });
     addEffect({ type:'ring', x:s.owner.x, y:s.owner.y, t:0, life:0.8, r0:10, r1:170, color:'#fff0b0', width:5 });
     G.flash = Math.max(G.flash, 0.25);
+  }
+
+  /* ★ 魔虚罗陨落 → 适应成果转移给十影宿傩 */
+  if (killed && s.type === 'mahoraga' && s.owner && s.owner.alive){
+    const c2 = CFG.sukunaTs;
+    let stacks = 0;
+    if (s.adapt) for (const k in s.adapt) stacks += s.adapt[k];
+    const dr = Math.min(c2.mahoTransferMax, stacks * c2.mahoTransferStep);
+    const ow = s.owner;
+    ow.adaptDR = Math.max(ow.adaptDR || 0, dr);
+    ow.adaptDomain = {
+      gojo:   s.domAdapt ? s.domAdapt.gojo   : 0,
+      sukuna: s.domAdapt ? s.domAdapt.sukuna : 0,
+    };
+    if (dr > 0 || (s.domAdapt && s.domAdapt.gojo + s.domAdapt.sukuna > 0)){
+      addEffect({ type:'text', x:ow.x, y:ow.y-126, t:0, life:2.4,
+        text:'魔虚罗的适应已继承 · 自适应减伤 ' + Math.round(dr*100) + '%', color:'#ffd76a', size:15 });
+      playSfx('mahoragaAdapt', ow.type, 1);
+    }
   }
 
   summons.splice(i, 1);
@@ -3138,7 +3758,12 @@ function applyDomainEffect(owner, target, dt){
   if (!inThis || inOwn) return;
 
   if (d.type === 'gojo'){
-    target.stun = Math.max(target.stun, 2);
+    /* ★ 已继承魔虚罗适应（如十影宿傩）：僵直大幅缩短，但仍被减速 */
+    const ad = target.adaptDomain;
+    const resist = (ad && finite(ad.gojo))
+      ? clamp(ad.gojo / CFG.sukunaTs.mahoDomAdaptGojo, 0, 1) : 0;
+    target.stun = Math.max(target.stun, 2 * (1 - resist));
+    if (resist >= 1){ target.domSlow = 0.25; target.domSlowMul = CFG.sukunaTs.mahoDomAdaptSlow; }
     if (!d.hitOpponent){
       d.hitOpponent = true;
       target.domainLock = 20;
@@ -3163,11 +3788,28 @@ function applyDomainEffect(owner, target, dt){
         text:'诛伏赐死 · 10 秒内术式禁止 · 拘传到庭', color:'#ffd76a', size:16 });
       G.flash = 0.5;
     }
+  } else if (d.type === 'mahito'){
+    /* ★ 自闭圆顿裹：领域内的敌人持续被灵魂改造（离开后才开始衰减） */
+    const dur = CFG.mahito.domainSoulDur;
+    const first = !d.hitOpponent;
+    applySoulAlter(target, dur, !first);
+    if (first){
+      d.hitOpponent = true;
+      addEffect({ type:'text', x:target.x, y:target.y-70, t:0, life:1.8,
+        text:'自闭圆顿裹 · 灵魂改造 ' + dur + 's', color:'#c9a4ff', size:16 });
+      G.flash = 0.5;
+    }
   } else {
     /* 伏魔御厨子（含十影宿傩）：持续伤害 + 刀剑劈砍式自动斩击 */
     const c = CFG[d.type];
     const dps = (c && finite(c.domainDps)) ? c.domainDps : 34;
-    damage(target, dps * dt, true);
+    /* ★ 已继承魔虚罗适应（如十影宿傩）→ 在御厨子中获得减伤 */
+    let domDR = 0;
+    const ad = target.adaptDomain;
+    if (ad && finite(ad.sukuna))
+      domDR = clamp(ad.sukuna / CFG.sukunaTs.mahoDomAdaptSukuna, 0, 1) * CFG.sukunaTs.mahoDomAdaptDR;
+    /* ★ 领域内攻击力加成对领域自身 DPS 同样生效 */
+    dealDamage(owner, target, dps * dt * (1 - domDR), true);
     d.slashT = (d.slashT || 0) + dt;
     while (d.slashT >= DOMAIN_SLASH_STEP){
       d.slashT -= DOMAIN_SLASH_STEP;
@@ -3178,15 +3820,51 @@ function applyDomainEffect(owner, target, dt){
 
 /* ══════════════════════════════════════════
    ★ 简易领域 / 弥虚葛笼
-   身下生成一个跟随自身移动的绿色半透明圆环；
-   圆环存在期间，敌方领域对内无效；6 秒后闪烁消失
+   身下生成一个跟随自身移动的绿色半透明圆环，圆环存在期间敌方领域对内无效。
+   重做后的交互：抗衡消耗咒力 → 蓄势层数 → 主动引爆；细节见 SD_TUNE 注释
    ══════════════════════════════════════════ */
 function sdName(type){
   return type === 'gojo' ? '简易领域' : '弥虚葛笼';
 }
+
+/* ★ 简易领域 / 弥虚葛笼（重做：从「按下不管」变成需要取舍的主动技）
+   —— ① 抗衡：身处敌方领域内时每帧消耗咒力维持，咒力见底当场碎裂
+   —— ② 蓄势：在敌方领域里每撑住 step 秒积累 1 层（上限 max）
+             层数决定「引爆」的威力与冷却返还
+   —— ③ 引爆：展开期间再按一次 C → 收束成冲击波（伤害 + 击退 + 大量冷却返还），
+             也能顺手把贴脸的敌方式神清掉
+   —— ④ 完美展开：敌方领域刚展开 window 秒内响应 → 持续更久、起手就带 2 层、
+             且前 perfectFree 秒不消耗维持咒力
+   三个角色的 cost/cd/duration/r 仍在 CFG 里，通用机制常量统一放这里 */
+const SD_TUNE = {
+  drain: 13,           /* 抗衡时每秒消耗的咒力 */
+  step: 0.5,           /* 每抗衡多久积累 1 层蓄势 */
+  max: 5,              /* 蓄势层数上限 */
+  window: 1.2,         /* 敌方领域展开后多少秒内响应算「完美展开」 */
+  perfectDur: 1.5,     /* 完美展开的额外持续时间 */
+  perfectCharge: 2,    /* 完美展开的起手蓄势层数 */
+  perfectFree: 2.0,    /* 完美展开后免维持消耗的秒数 */
+  burstDmg: 55,        /* 引爆基础伤害 */
+  burstPerCharge: 26,  /* 每层蓄势追加伤害（满层 185） */
+  burstR: 210,         /* 引爆半径 */
+  burstKb: 900,        /* 引爆击退力度 */
+  burstCdMul: 0.35,    /* 引爆后的冷却倍率（每层再 −5%，下限 15%） */
+};
+
 /* 该角色是否正被自己的简易领域保护 */
 function protectedBySimpleDomain(f){
   return !!(f && f.sd && f.sd.t < f.sd.dur && f.alive);
+}
+
+/* 该角色是否正身处「别人的领域」里（此时弥虚葛笼要顶着压力） */
+function simpleDomainContested(f){
+  if (!f) return false;
+  const foe = f === player ? enemy : player;
+  const fd = foe && foe.domain;
+  if (!fd) return false;
+  if (dist(f, fd) >= fd.r) return false;
+  if (f.domain && dist(f, f.domain) < f.domain.r) return false;   /* 站在自己领域里不算 */
+  return true;
 }
 
 function castSimpleDomain(f){
@@ -3194,18 +3872,38 @@ function castSimpleDomain(f){
   const c = CFG[f.type];
   if (!finite(c.sdCost) || !finite(c.sdDuration)) return;   /* 该角色没有此技能 */
   if (f.skillLock > 0 || f.cd.sd > 0 || f.ce < c.sdCost) return;
+
+  /* ★ 完美展开：敌方领域刚展开就立刻响应 */
+  const foe = f === player ? enemy : player;
+  const perfect = !!(foe && foe.domain && foe.domain.t <= SD_TUNE.window);
+
   f.ce -= c.sdCost;
   f.cd.sd = c.sdCd;
-  f.sd = { t: 0, dur: c.sdDuration, r: c.sdR };
+  f.sd = {
+    t: 0,
+    dur: c.sdDuration + (perfect ? SD_TUNE.perfectDur : 0),
+    r: c.sdR,
+    charge: perfect ? SD_TUNE.perfectCharge : 0,
+    chargeT: 0,
+    freeT: perfect ? SD_TUNE.perfectFree : 0,
+    perfect: perfect,
+    contested: false,
+  };
   const name = sdName(f.type);
-  addEffect({ type:'text', x:f.x, y:f.y-78, t:0, life:1.5, text:name, color:'#7dffb8', size:20 });
-  addEffect({ type:'ring', x:f.x, y:f.y, t:0, life:0.6, r0:12, r1:c.sdR*1.25, color:'#5cf0a0', width:6 });
-  for (let i=0;i<14;i++){
+  addEffect({ type:'text', x:f.x, y:f.y-78, t:0, life:1.5,
+    text: perfect ? name + ' · 完美展开' : name,
+    color: perfect ? '#e0fff4' : '#7dffb8', size: perfect ? 22 : 20 });
+  addEffect({ type:'ring', x:f.x, y:f.y, t:0, life:0.6, r0:12, r1:c.sdR*1.25,
+    color: perfect ? '#c8ffe8' : '#5cf0a0', width: perfect ? 8 : 6 });
+  const n = perfect ? 26 : 14;
+  for (let i=0;i<n;i++){
     const a = rnd(0, TAU);
     addEffect({ type:'spark', x:f.x + Math.cos(a)*c.sdR, y:f.y + Math.sin(a)*c.sdR,
       t:0, life:rnd(.3,.6), vx:-Math.cos(a)*rnd(40,110), vy:-Math.sin(a)*rnd(40,110),
       color:'#8dffc4', size:3 });
   }
+  playSfx('domainSpawn', f.type, f === player ? 0.8 : 0.45);
+  if (perfect) G.flash = Math.max(G.flash, 0.22);
 }
 
 /* 每帧推进简易领域计时；到期后进入 0.6 秒闪烁，再消失 */
@@ -3213,6 +3911,27 @@ function tickSimpleDomain(f, dt){
   if (!f || !f.sd) return;
   const sd = f.sd;
   sd.t += dt;
+
+  /* ① 抗衡 + ② 蓄势 */
+  sd.contested = simpleDomainContested(f);
+  if (sd.contested && sd.t < sd.dur){
+    if (sd.freeT > 0){
+      sd.freeT -= dt;                       /* 完美展开：前几秒免费 */
+    } else {
+      f.ce = Math.max(0, f.ce - SD_TUNE.drain * dt);
+      if (f.ce <= 0.001){ breakSimpleDomain(f, '咒力耗尽'); return; }
+    }
+    sd.chargeT = (sd.chargeT || 0) + dt;
+    if (sd.chargeT >= SD_TUNE.step){
+      sd.chargeT -= SD_TUNE.step;
+      if (sd.charge < SD_TUNE.max){
+        sd.charge++;
+        addEffect({ type:'text', x:f.x, y:f.y-52, t:0, life:0.7,
+          text:'蓄势 ×' + sd.charge, color:'#a8ffd2', size:12 });
+      }
+    }
+  }
+
   if (sd.t >= sd.dur + 0.6){
     f.sd = null;
     addEffect({ type:'ring', x:f.x, y:f.y, t:0, life:0.45, r0:sd.r*0.9, r1:sd.r*0.4,
@@ -3223,6 +3942,58 @@ function tickSimpleDomain(f, dt){
     sd.warned = true;
     addEffect({ type:'text', x:f.x, y:f.y-74, t:0, life:0.6,
       text: sdName(f.type) + ' · 即将消散', color:'#a8ffd2', size:13 });
+  }
+}
+
+/* ★ 抗衡失败（咒力被抽干）→ 当场碎裂，冷却不返还 */
+function breakSimpleDomain(f, reason){
+  if (!f || !f.sd) return;
+  const sd = f.sd;
+  f.sd = null;
+  playSfx('domainBreak', f.type, f === player ? 0.9 : 0.5);
+  addEffect({ type:'ring', x:f.x, y:f.y, t:0, life:0.5, r0:sd.r, r1:sd.r*0.3,
+    color:'#5cf0a0', width:6 });
+  addEffect({ type:'text', x:f.x, y:f.y-74, t:0, life:1.3,
+    text: sdName(f.type) + ' 碎裂 · ' + reason, color:'#ff9a9a', size:15 });
+  G.shake = Math.max(G.shake, 10);
+}
+
+/* ★ 主动引爆：把弥虚葛笼收束成一记冲击波（伤害 + 击退 + 大量冷却返还） */
+function detonateSimpleDomain(f){
+  if (!f || !f.alive || !f.sd) return;
+  const c = CFG[f.type];
+  const sd = f.sd;
+  if (sd.t >= sd.dur) return;              /* 闪烁期已经拦不住领域了，不能再引爆 */
+  const foe = f === player ? enemy : player;
+  const charge = sd.charge;
+  const dmg = SD_TUNE.burstDmg + charge * SD_TUNE.burstPerCharge;
+  const R = SD_TUNE.burstR;
+
+  f.sd = null;
+  /* ★ 主动收束远比被打破划算：层数越高冷却越短（最低 15%） */
+  f.cd.sd = Math.max(0, c.sdCd * Math.max(0.15, SD_TUNE.burstCdMul - charge * 0.05));
+
+  playSfx('domainBreak', f.type, f === player ? 1 : 0.6);
+  addEffect({ type:'text', x:f.x, y:f.y-80, t:0, life:1.3,
+    text: sdName(f.type) + ' · 引爆 ×' + charge, color:'#e0fff4', size:20 });
+  addEffect({ type:'ring', x:f.x, y:f.y, t:0, life:0.5, r0: sd.r*0.35, r1: R,
+    color:'#7dffb8', width:8 });
+  addEffect({ type:'ring', x:f.x, y:f.y, t:0, life:0.4, r0:10, r1: R*0.8,
+    color:'#eafff5', width:4 });
+  spawnBurst(f.x, f.y, '#8dffc4', 20 + charge * 4, 160, 620, 2, 6);
+  G.shake = Math.max(G.shake, 16 + charge * 2);
+  G.flash = Math.max(G.flash, 0.25);
+
+  if (foe && foe.alive && dist(f, foe) < R + foe.r){
+    dealDamage(f, foe, dmg);
+    const a = Math.atan2(foe.y - f.y, foe.x - f.x);
+    foe.kbx = Math.cos(a) * SD_TUNE.burstKb;
+    foe.kby = Math.sin(a) * SD_TUNE.burstKb;
+  }
+  for (const s of summons){
+    if (!s || s.owner !== foe) continue;
+    if (!finite(s.x) || !finite(s.y) || s.hp <= 0) continue;
+    if (dist(f, s) < R + s.r) damageSummon(s, dmg, 'sdburst');
   }
 }
 
@@ -3240,7 +4011,7 @@ function applyDomainToSummons(owner, dt){
   if (!owner || !owner.domain) return;
   const d = owner.domain;
   const c = CFG[d.type];
-  if (d.type === 'higuruma') return;              /* 审判领域不作用于式神 */
+  if (d.type === 'higuruma' || d.type === 'mahito') return;              /* 审判 / 自闭圆顿裹不作用于式神 */
   for (const s of summons){
     if (!s || s.owner === owner) continue;           // 只影响敌方式神
     if (!finite(s.x) || !finite(s.y) || s.hp <= 0) continue;
@@ -3250,22 +4021,45 @@ function applyDomainToSummons(owner, dt){
     const inOwn = s.owner.domain && dist(s, s.owner.domain) < s.owner.domain.r;
     if (!inThis || inOwn) continue;
 
+    if (s.type === 'mahoraga' && !s.domAdapt) s.domAdapt = { gojo: 0, sukuna: 0 };
+
     if (d.type === 'gojo'){
-      /* 无量空处：僵直式神（魔虚罗可适应，逐渐缩短僵直时间） */
-      let stun = 2;
+      /* ★ 无量空处：适应改为「累计在领域内待过多长时间」
+         —— 待够 mahoDomAdaptGojo 秒后不再被僵直，但在领域中依旧减速 */
+      let resist = 0;
       if (s.type === 'mahoraga'){
-        if (!s.adapt) s.adapt = {};
-        const stacks = s.adapt['domain'] || 0;
         const c2 = CFG.sukunaTs;
-        const dr = Math.min(c2.mahoAdaptMax, stacks * c2.mahoAdaptStep);
-        stun *= (1 - dr);
-        s.adapt['domain'] = stacks + 1;
+        const before = s.domAdapt.gojo;
+        s.domAdapt.gojo = before + dt;
+        resist = clamp(s.domAdapt.gojo / c2.mahoDomAdaptGojo, 0, 1);
+        if (before < c2.mahoDomAdaptGojo && s.domAdapt.gojo >= c2.mahoDomAdaptGojo){
+          playSfx('mahoragaAdapt', s.owner ? s.owner.type : 'sukunaTs', s.owner === player ? 1 : 0.5);
+          addEffect({ type:'text', x:s.x, y:s.y - s.r - 34, t:0, life:1.8,
+            text:'适应 · 无量空处（可行动）', color:'#ffd76a', size:13 });
+        }
       }
-      s.stun = Math.max(s.stun || 0, stun);
+      const stun = 2 * (1 - resist);
+      if (stun > 0.05) s.stun = Math.max(s.stun || 0, stun);
+      if (resist >= 1){      /* 适应完成：动得了，但在领域里依旧被减速 */
+        s.slowT = 0.25;
+        s.slowMul = CFG.sukunaTs.mahoDomAdaptSlow;
+      }
     } else {
-      /* 伏魔御厨子：持续灼烧式神（魔虚罗经 damageSummon 获得对领域的适应） */
+      /* ★ 伏魔御厨子：在领域里累计待 mahoDomAdaptSukuna 秒后获得减伤 */
       const dps = (c && finite(c.domainDps)) ? c.domainDps : 34;
-      damageSummon(s, dps * dt, 'domain', true);
+      let dr = 0;
+      if (s.type === 'mahoraga'){
+        const c2 = CFG.sukunaTs;
+        const before = s.domAdapt.sukuna;
+        s.domAdapt.sukuna = before + dt;
+        dr = clamp(s.domAdapt.sukuna / c2.mahoDomAdaptSukuna, 0, 1) * c2.mahoDomAdaptDR;
+        if (before < c2.mahoDomAdaptSukuna && s.domAdapt.sukuna >= c2.mahoDomAdaptSukuna){
+          playSfx('mahoragaAdapt', s.owner ? s.owner.type : 'sukunaTs', s.owner === player ? 1 : 0.5);
+          addEffect({ type:'text', x:s.x, y:s.y - s.r - 34, t:0, life:1.8,
+            text:'适应 · 伏魔御厨子（减伤 ' + Math.round(c2.mahoDomAdaptDR*100) + '%）', color:'#ffd76a', size:13 });
+        }
+      }
+      damageSummon(s, dps * dt * (1 - dr), 'domain', true);
       d.slashT2 = (d.slashT2 || 0) + dt;
       while (d.slashT2 >= DOMAIN_SLASH_STEP){
         d.slashT2 -= DOMAIN_SLASH_STEP;
@@ -3540,6 +4334,55 @@ function drawDomain(d){
       ctx.stroke();
     }
     ctx.restore();
+  } else if (d.type === 'mahito'){
+    /* ★ 自闭圆顿裹：外层黑色球壳 + 紫黑色内填充 + 中央摊开的带缝合线手掌 */
+    /* 紫黑内填充 */
+    const shell = ctx.createRadialGradient(d.x, d.y, Math.max(1, d.r*0.52), d.x, d.y, Math.max(2, d.r));
+    shell.addColorStop(0,   `rgba(46,10,72,${alpha*0.95})`);
+    shell.addColorStop(0.72,`rgba(16,4,26,${Math.min(1, alpha*1.15)})`);
+    shell.addColorStop(1,   `rgba(0,0,0,${Math.min(1, alpha*1.35)})`);
+    ctx.beginPath(); ctx.arc(d.x, d.y, d.r, 0, TAU);
+    ctx.fillStyle = shell; ctx.fill();
+
+    /* 紫黑辉光 */
+    const glow = ctx.createRadialGradient(d.x, d.y, 2, d.x, d.y, Math.max(3, d.r*0.74));
+    glow.addColorStop(0,   `rgba(110,50,190,${alpha*0.55})`);
+    glow.addColorStop(0.55,`rgba(70,26,130,${alpha*0.25})`);
+    glow.addColorStop(1,   'rgba(40,8,80,0)');
+    ctx.beginPath(); ctx.arc(d.x, d.y, Math.max(3, d.r*0.74), 0, TAU);
+    ctx.fillStyle = glow; ctx.fill();
+
+    /* 外层黑色球壳（厚黑环 + 内侧紫环）—— 展开瞬间半径可能还很小，必须夹正 */
+    ctx.strokeStyle = `rgba(0,0,0,${Math.min(1, alpha*1.7)})`;
+    ctx.lineWidth = 16;
+    ctx.beginPath(); ctx.arc(d.x, d.y, Math.max(2, d.r - 6), 0, TAU); ctx.stroke();
+    ctx.strokeStyle = `rgba(150,96,225,${Math.min(1, alpha*1.5)})`;
+    ctx.lineWidth = 2.5;
+    if (d.r > 17){ ctx.beginPath(); ctx.arc(d.x, d.y, d.r - 15, 0, TAU); ctx.stroke(); }
+
+    /* 缓慢旋转的球壳焊缝 + 经纬线 */
+    ctx.save();
+    ctx.translate(d.x, d.y);
+    ctx.rotate(G.time*0.16);
+    ctx.strokeStyle = `rgba(175,120,245,${alpha*0.85})`;
+    ctx.lineWidth = 2;
+    for (let i = 0; i < 24; i++){
+      const a = i/24*TAU;
+      ctx.beginPath();
+      ctx.moveTo(Math.cos(a)*d.r*0.85, Math.sin(a)*d.r*0.85);
+      ctx.lineTo(Math.cos(a)*d.r*0.94, Math.sin(a)*d.r*0.94);
+      ctx.stroke();
+    }
+    ctx.strokeStyle = `rgba(130,70,210,${alpha*0.35})`;
+    ctx.lineWidth = 1.6;
+    for (let i = 1; i <= 4; i++){
+      const rr = d.r * (i/5);
+      ctx.beginPath(); ctx.arc(0, 0, rr, 0, TAU); ctx.stroke();
+    }
+    ctx.restore();
+
+    /* 中央：摊开的、带缝合线的手掌轮廓 */
+    drawMahitoHand(d.x, d.y, Math.min(d.r*0.44, 185), alpha);
   } else {
     /* 伏魔御厨子（含十影宿傩版本，颜色略暗） */
     const isTs = d.type === 'sukunaTs';
@@ -3651,36 +4494,75 @@ function drawSimpleDomain(f){
     if (a <= 0.06) return;
   }
   const R = sd.r;
+  const contested = !!sd.contested;             /* 正在被敌方领域挤压 */
+  const charge = sd.charge || 0;
+  const left = clamp(1 - sd.t / sd.dur, 0, 1);
+  const tint = sd.perfect ? '224,255,244' : '130,255,195';
 
   ctx.save();
   ctx.translate(f.x, f.y);
 
-  /* 地面光晕（半透明绿） */
+  /* 地面光晕：抗衡中被压制 → 变暗，暗示「撑不住」 */
+  const fillK = contested ? 0.62 : 1;
   const g = ctx.createRadialGradient(0, 0, R*0.12, 0, 0, R);
-  g.addColorStop(0,    `rgba(110,255,180,${0.26*a})`);
-  g.addColorStop(0.62, `rgba(60,225,145,${0.17*a})`);
+  g.addColorStop(0,    `rgba(110,255,180,${0.26*a*fillK})`);
+  g.addColorStop(0.62, `rgba(60,225,145,${0.17*a*fillK})`);
   g.addColorStop(1,    'rgba(35,190,115,0)');
   ctx.beginPath(); ctx.arc(0, 0, R, 0, TAU);
   ctx.fillStyle = g; ctx.fill();
 
   /* 外圈 */
   ctx.beginPath(); ctx.arc(0, 0, R, 0, TAU);
-  ctx.strokeStyle = `rgba(130,255,195,${0.8*a})`;
+  ctx.strokeStyle = `rgba(${tint},${0.8*a})`;
   ctx.lineWidth = 3;
   ctx.stroke();
+
+  /* ★ 剩余时间弧：从正上顺时针回填，一眼看出还能撑多久 */
+  if (!over){
+    ctx.beginPath();
+    ctx.arc(0, 0, R, -Math.PI/2, -Math.PI/2 + TAU*left);
+    ctx.strokeStyle = `rgba(${tint},${0.95*a})`;
+    ctx.lineWidth = 5;
+    ctx.stroke();
+  }
+
+  /* ★ 蓄势刻度：SD_TUNE.max 个点位，点亮的表示当前蓄势层数（引爆威力） */
+  for (let i = 0; i < SD_TUNE.max; i++){
+    const ang = -Math.PI/2 + i * (TAU / SD_TUNE.max);
+    const px = Math.cos(ang) * R * 0.90;
+    const py = Math.sin(ang) * R * 0.90;
+    const lit = i < charge;
+    if (lit){
+      ctx.beginPath(); ctx.arc(px, py, 9.5, 0, TAU);
+      ctx.strokeStyle = `rgba(160,255,210,${0.55*a})`;
+      ctx.lineWidth = 1.6;
+      ctx.stroke();
+    }
+    ctx.beginPath();
+    ctx.arc(px, py, lit ? 5.2 : 3.2, 0, TAU);
+    ctx.fillStyle = lit ? `rgba(205,255,235,${0.95*a})` : `rgba(120,220,170,${0.30*a})`;
+    ctx.fill();
+  }
+  /* 满层：脉动光环提示「可以打最大伤害了」 */
+  if (charge >= SD_TUNE.max){
+    ctx.beginPath(); ctx.arc(0, 0, R*1.05 + Math.sin(G.time*7)*3, 0, TAU);
+    ctx.strokeStyle = `rgba(230,255,245,${(0.35 + Math.sin(G.time*7)*0.18)*a})`;
+    ctx.lineWidth = 3;
+    ctx.stroke();
+  }
 
   /* 内圈虚线（缓慢反向旋转） */
   ctx.save();
   ctx.rotate(-G.time * 0.5);
   ctx.setLineDash([14, 11]);
-  ctx.beginPath(); ctx.arc(0, 0, R*0.8, 0, TAU);
+  ctx.beginPath(); ctx.arc(0, 0, R*0.80, 0, TAU);
   ctx.strokeStyle = `rgba(150,255,205,${0.5*a})`;
   ctx.lineWidth = 2;
   ctx.stroke();
   ctx.setLineDash([]);
   ctx.restore();
 
-  /* 内圈刻度（随角色朝向之外的独立旋转） */
+  /* 内圈刻度（反向旋转，不与蓄势点位冲突） */
   ctx.save();
   ctx.rotate(G.time * 0.85);
   ctx.strokeStyle = `rgba(170,255,215,${0.45*a})`;
@@ -3688,24 +4570,56 @@ function drawSimpleDomain(f){
   for (let i = 0; i < 8; i++){
     const ang = i * (TAU/8);
     ctx.beginPath();
-    ctx.moveTo(Math.cos(ang)*R*0.88, Math.sin(ang)*R*0.88);
-    ctx.lineTo(Math.cos(ang)*R*0.97, Math.sin(ang)*R*0.97);
+    ctx.moveTo(Math.cos(ang)*R*0.58, Math.sin(ang)*R*0.58);
+    ctx.lineTo(Math.cos(ang)*R*0.68, Math.sin(ang)*R*0.68);
     ctx.stroke();
   }
   ctx.restore();
 
-  /* 中心符纹：简易领域 / 弥虚葛笼 */
-  const glyph = f.type === 'gojo' ? '简' : '笼';
-  ctx.save();
-  ctx.globalAlpha = 0.5 * a;
-  ctx.fillStyle = '#9dffcb';
-  ctx.font = '700 30px system-ui,sans-serif';
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.fillText(glyph, 0, 14);
-  ctx.restore();
+  /* ★ 抗衡中：敌方领域正从外向内挤压 → 锯齿状压力弧 + 反向虚线压力环 */
+  if (contested && !over){
+    ctx.save();
+    ctx.rotate(G.time * 0.6);
+    ctx.strokeStyle = `rgba(235,255,250,${0.55*a})`;
+    ctx.lineWidth = 2.2;
+    for (let i = 0; i < 6; i++){
+      const a0 = i * (TAU/6);
+      const wob = 7 + Math.sin(G.time * 11 + i * 1.7) * 5;
+      ctx.beginPath();
+      ctx.moveTo(Math.cos(a0)*R, Math.sin(a0)*R);
+      ctx.lineTo(Math.cos(a0 + 0.10)*(R + wob), Math.sin(a0 + 0.10)*(R + wob));
+      ctx.lineTo(Math.cos(a0 + 0.22)*(R + 2), Math.sin(a0 + 0.22)*(R + 2));
+      ctx.stroke();
+    }
+    ctx.restore();
+    ctx.save();
+    ctx.rotate(-G.time * 1.15);
+    ctx.setLineDash([6, 16]);
+    ctx.beginPath(); ctx.arc(0, 0, R*1.12, 0, TAU);
+    ctx.strokeStyle = `rgba(255,255,255,${0.30*a})`;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.restore();
+  }
 
   ctx.restore();
+
+  /* ★ 圈下方的一行状态：把新机制的关键信息摊开给玩家看 */
+  if (!over){
+    const tags = [];
+    if (sd.perfect) tags.push('完美展开');
+    if (charge > 0)  tags.push('蓄势 ×' + charge);
+    if (contested)   tags.push('抗衡中 −' + SD_TUNE.drain + '咒力/s');
+    if (tags.length){
+      ctx.save();
+      ctx.font = '700 12px system-ui,sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillStyle = contested ? 'rgba(255,228,180,0.95)' : 'rgba(184,255,222,0.95)';
+      ctx.fillText(tags.join(' · '), f.x, f.y + R + 22);
+      ctx.restore();
+    }
+  }
 }
 
 function drawSummons(){
@@ -3994,33 +4908,7 @@ function drawSummons(){
       ctx.fillStyle = 'rgba(0,0,0,0.45)';
       ctx.fill();
 
-      // 背部尖刺光环（头顶，反向旋转）
-      ctx.save();
-      ctx.translate(0, -R * 1.55);
-      ctx.rotate(-G.time * 1.35 + ph * 0.2);
-      ctx.strokeStyle = 'rgba(255,168,60,0.92)';
-      ctx.lineWidth = 3;
-      ctx.beginPath(); ctx.arc(0, 0, R * 0.86, 0, TAU); ctx.stroke();
-      ctx.fillStyle = 'rgba(255,170,60,0.95)';
-      for (let i = 0; i < 9; i++){
-        const a = i / 9 * TAU;
-        const len = R * (0.72 + 0.1 * Math.sin(ph * 5 + i));
-        ctx.save();
-        ctx.rotate(a);
-        ctx.beginPath();
-        ctx.moveTo(R * 0.78, -3.4);
-        ctx.lineTo(R * 0.78 + len * 0.34, 0);
-        ctx.lineTo(R * 0.78, 3.4);
-        ctx.closePath();
-        ctx.fill();
-        ctx.restore();
-      }
-      ctx.beginPath(); ctx.arc(0, 0, R * 0.18, 0, TAU);
-      ctx.fillStyle = 'rgba(255,222,150,0.95)';
-      ctx.fill();
-      ctx.restore();
-
-      // 本体：橙色球体
+      // ★ 本体：橙色球体（无任何光环装饰，定位为纯输出型）
       ctx.beginPath();
       ctx.arc(0, 0, R, 0, TAU);
       const g = ctx.createRadialGradient(-R*0.34, -R*0.36, 2, 0, 0, R);
@@ -4118,6 +5006,65 @@ function drawSummons(){
         ctx.arc(0, 0, R + 6, -Math.PI/2, -Math.PI/2 + TAU * ratio);
         ctx.strokeStyle = 'rgba(255,170,60,0.75)';
         ctx.lineWidth = 2.5;
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+    else if (s.type === 'mutant'){
+      /* ★ 改造人：灰白小球 + 靖蓝缝线，会自动追击并撕打 */
+      const angle = finite(s.angle) ? s.angle : 0;
+      const ph = s.mutantPhase || 0;
+      ctx.save();
+      ctx.translate(s.x, s.y);
+
+      // 影子
+      ctx.beginPath(); ctx.arc(0, s.r*0.8, s.r*0.9, 0, TAU);
+      ctx.fillStyle = 'rgba(0,0,0,0.4)'; ctx.fill();
+
+      // 身体
+      ctx.beginPath(); ctx.arc(0,0,s.r,0,TAU);
+      const g = ctx.createRadialGradient(-s.r*0.3,-s.r*0.3,1, 0,0,s.r);
+      g.addColorStop(0,'#f6f9fc'); g.addColorStop(0.6,'#e2e6ea'); g.addColorStop(1,'#a8b3c0');
+      ctx.fillStyle = g; ctx.fill();
+      ctx.strokeStyle = s.hitFlash > 0 ? '#ff9a9a' : '#3d5570';
+      ctx.lineWidth = 2; ctx.stroke();
+
+      // 缝合嘴 + 眼（朝向目标）
+      ctx.save();
+      ctx.rotate(angle);
+      ctx.strokeStyle = '#3d5570';
+      ctx.lineWidth = 1.6;
+      ctx.beginPath(); ctx.moveTo(s.r*0.08,-s.r*0.34); ctx.lineTo(s.r*0.70,-s.r*0.34); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(s.r*0.08, s.r*0.34); ctx.lineTo(s.r*0.70, s.r*0.34); ctx.stroke();
+      ctx.lineWidth = 1.3;
+      for (let i = 0; i < 4; i++){
+        const x = s.r*(0.14 + i*0.16);
+        ctx.beginPath(); ctx.moveTo(x-2, -s.r*0.42); ctx.lineTo(x+2, -s.r*0.26); ctx.stroke();
+      }
+      ctx.fillStyle = '#3d5570';
+      ctx.beginPath(); ctx.arc(s.r*0.30, -s.r*0.62, 1.8, 0, TAU); ctx.fill();
+      ctx.beginPath(); ctx.arc(s.r*0.30,  s.r*0.62, 1.8, 0, TAU); ctx.fill();
+      ctx.restore();
+
+      // 手肘抽动的弧光
+      if (s.biteAnim > 0){
+        const k = clamp(s.biteAnim / 0.26, 0, 1);
+        ctx.save(); ctx.rotate(angle);
+        ctx.strokeStyle = `rgba(226,230,234,${0.2 + k*0.7})`;
+        ctx.lineWidth = 2 + 4*k; ctx.lineCap = 'round';
+        ctx.beginPath(); ctx.arc(0, 0, s.r*1.5, -0.6, 0.6); ctx.stroke();
+        ctx.lineCap = 'butt';
+        ctx.restore();
+      }
+
+      drawSummonBar(s, s.r + 14, '#e2e6ea');
+
+      const ratio = clamp(s.life / s.maxLife, 0, 1);
+      if (ratio > 0 && ratio <= 1){
+        ctx.beginPath();
+        ctx.arc(0, 0, s.r + 4, -Math.PI/2, -Math.PI/2 + TAU * ratio);
+        ctx.strokeStyle = 'rgba(61,85,112,0.85)';
+        ctx.lineWidth = 1.6;
         ctx.stroke();
       }
       ctx.restore();
@@ -4369,12 +5316,17 @@ function drawFighter(f){
   else if (f.type === 'sukunaTs') drawSukunaTs(f);
   else if (f.type === 'higuruma') drawHiguruma(f);
   else if (f.type === 'toji') drawToji(f);
+  else if (f.type === 'mahito') drawMahito(f);
   else drawSukuna(f);
 }
 
-/* ★ 通用状态标记：死刑（受伤 +50%） / 术式禁止（审判） */
+/* ★ 通用状态标记：死刑 / 术式禁止 / 领域攻击强化 / 灵魂改造 / 内体变形 */
 function drawStatusAuras(f){
-  if (!f || (!(f.sentence > 0) && !(f.skillLock > 0))) return;
+  if (!f) return;
+  const buff = domainAtkMul(f);
+  const soul = (f.soulAlter || 0) > 0;
+  const form = (f.formT || 0) > 0;
+  if (!(f.sentence > 0) && !(f.skillLock > 0) && buff <= 1 && !soul && !form) return;
 
   ctx.save();
   ctx.translate(f.x, f.y);
@@ -4395,11 +5347,62 @@ function drawStatusAuras(f){
     if (ctx.setLineDash) ctx.setLineDash([]);
     ctx.restore();
   }
+  if (buff > 1){
+    /* 在自身领域内 → 攻击力提升：角色脚下缓缓旋转的金色环 */
+    const pulse = 0.45 + Math.sin(G.time*4)*0.2;
+    ctx.beginPath(); ctx.arc(0,0, f.r + 21, 0, TAU);
+    ctx.strokeStyle = `rgba(255,225,140,${pulse})`;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  }
+  if (form){
+    /* 内体变形：外层靖蓝色厚环 */
+    ctx.beginPath(); ctx.arc(0,0, f.r + 30, 0, TAU);
+    ctx.strokeStyle = `rgba(61,85,112,${0.5 + Math.sin(G.time*14)*0.3})`;
+    ctx.lineWidth = 3.5;
+    ctx.stroke();
+  }
+  if (soul){
+    /* ★ 灵魂改造：一圈紫黑色扭曲缝合纹 */
+    const R = f.r + 17 + Math.sin(G.time*7)*2.5;
+    ctx.beginPath(); ctx.arc(0,0, R, 0, TAU);
+    ctx.strokeStyle = 'rgba(90,40,150,0.9)';
+    ctx.lineWidth = 3;
+    ctx.stroke();
+    const n = 20;
+    const rot = G.time * 0.7;
+    /* 扭曲的锯齿缝合线 */
+    ctx.strokeStyle = 'rgba(170,120,240,0.95)';
+    ctx.lineWidth = 2;
+    for (let i = 0; i < n; i++){
+      const a0 = i/n*TAU + rot;
+      const a1 = a0 + (TAU/n) * 0.55;
+      const rr = R + ((i % 2) ? 5.5 : -4.5);
+      ctx.beginPath();
+      ctx.moveTo(Math.cos(a0)*R, Math.sin(a0)*R);
+      ctx.lineTo(Math.cos(a1)*rr, Math.sin(a1)*rr);
+      ctx.stroke();
+    }
+    /* 缝针（横向小短线） */
+    ctx.strokeStyle = 'rgba(226,230,234,0.8)';
+    ctx.lineWidth = 1.5;
+    for (let i = 0; i < n; i++){
+      const a = i/n*TAU + rot;
+      const px = Math.cos(a)*R, py = Math.sin(a)*R;
+      ctx.beginPath();
+      ctx.moveTo(px - Math.sin(a)*5, py + Math.cos(a)*5);
+      ctx.lineTo(px + Math.sin(a)*5, py - Math.cos(a)*5);
+      ctx.stroke();
+    }
+  }
   ctx.restore();
 
   const tags = [];
   if (f.sentence > 0)  tags.push(['死刑 ' + f.sentence.toFixed(1) + 's', 'rgba(255,90,90,0.95)']);
   if (f.skillLock > 0) tags.push(['术式禁止 ' + f.skillLock.toFixed(1) + 's', 'rgba(255,215,110,0.95)']);
+  if (soul)            tags.push(['灵魂改造 ' + f.soulAlter.toFixed(1) + 's', 'rgba(180,130,255,0.98)']);
+  if (form)            tags.push(['内体变形 ' + f.formT.toFixed(1) + 's', 'rgba(206,216,226,0.95)']);
+  if (buff > 1)        tags.push(['领域增幅 攻击 ×' + buff.toFixed(2), 'rgba(255,225,140,0.98)']);
   if (!tags.length) return;
 
   ctx.save();
@@ -4666,6 +5669,77 @@ function drawToji(t){
   ctx.restore();
 }
 
+/* ★ 真人：灰白圆身 + 靖蓝缝线（直接复用伏黑甚尔的圆身 + 朝向指示器结构，只改色） */
+function drawMahito(m){
+  const BODY = '#e2e6ea';
+  const STITCH = '#3d5570';
+  ctx.save();
+  ctx.translate(m.x, m.y);
+
+  /* 圆身 */
+  ctx.beginPath(); ctx.arc(0,0,m.r,0,TAU);
+  const bg = ctx.createRadialGradient(-m.r*0.35,-m.r*0.35,1, 0,0,m.r);
+  bg.addColorStop(0,'#f6f9fc'); bg.addColorStop(0.55, BODY); bg.addColorStop(1,'#b6c0cc');
+  ctx.fillStyle = bg; ctx.fill();
+  ctx.strokeStyle = m.hitFlash > 0 ? '#ff4a4a' : STITCH;
+  ctx.lineWidth = 2.5; ctx.stroke();
+
+  /* 脸部的靖蓝缝合线 */
+  ctx.save();
+  ctx.strokeStyle = STITCH; ctx.lineWidth = 1.6;
+  for (const sy of [-1, 1]){
+    ctx.beginPath();
+    ctx.moveTo(-m.r*0.60, sy*m.r*0.30);
+    ctx.lineTo(m.r*0.60, sy*m.r*0.30);
+    ctx.stroke();
+    for (let i = -2; i <= 2; i++){
+      const x = i * m.r*0.26;
+      ctx.beginPath();
+      ctx.moveTo(x - 3.5, sy*m.r*0.30 - 4.5);
+      ctx.lineTo(x + 3.5, sy*m.r*0.30 + 4.5);
+      ctx.stroke();
+    }
+  }
+  ctx.restore();
+
+  /* 朝向指示器：靖蓝缝合触手 */
+  ctx.save();
+  ctx.rotate(finite(m.facing) ? m.facing : 0);
+  ctx.lineCap = 'round';
+  ctx.strokeStyle = STITCH; ctx.lineWidth = 6;
+  ctx.beginPath(); ctx.moveTo(m.r*0.10, 0); ctx.lineTo(m.r*0.95, 0); ctx.stroke();
+  ctx.strokeStyle = BODY; ctx.lineWidth = 3.2;
+  ctx.beginPath(); ctx.moveTo(m.r*0.62, 0); ctx.lineTo(m.r*1.56, 0); ctx.stroke();
+  ctx.strokeStyle = STITCH; ctx.lineWidth = 1.6;
+  for (let i = 0; i < 3; i++){
+    const x = m.r*1.60 + i*5;
+    ctx.beginPath(); ctx.moveTo(x-3, -4.5); ctx.lineTo(x+3, 4.5); ctx.stroke();
+  }
+  ctx.lineCap = 'butt';
+  ctx.restore();
+
+  /* 内体变形：外圈靖蓝厚环 */
+  if (m.formT > 0){
+    ctx.beginPath(); ctx.arc(0,0, m.r + 10, 0, TAU);
+    ctx.strokeStyle = `rgba(61,85,112,${0.6 + Math.sin(G.time*14)*0.3})`;
+    ctx.lineWidth = 4; ctx.stroke();
+  }
+  ctx.restore();
+
+  /* 名牌 */
+  ctx.save();
+  ctx.font = '700 13px system-ui,sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillStyle = 'rgba(226,230,234,0.95)';
+  ctx.fillText('真人', m.x, m.y - m.r - 16);
+  if (m.stun > 0){
+    ctx.fillStyle = 'rgba(255,180,180,0.95)';
+    ctx.font = '700 12px system-ui,sans-serif';
+    ctx.fillText('僵直 ' + m.stun.toFixed(1) + 's', m.x, m.y + m.r + 22);
+  }
+  ctx.restore();
+}
+
 /* ★ 万里锁拖拽期间，在施法者与目标之间画出一条锁链 */
 function drawPullChain(f){
   const p = f && f.pull;
@@ -4755,6 +5829,57 @@ function drawEffects(){
       ctx.lineCap = 'round';
       ctx.beginPath(); ctx.moveTo(8, 0); ctx.lineTo(reach, 0); ctx.stroke();
       ctx.lineCap = 'butt';
+      ctx.restore();
+    }
+    else if (e.type === 'tentacle'){
+      /* ★ 无为转变：前伸的变形触手（命中时末端爆开紫黑） */
+      ctx.save();
+      ctx.translate(e.x, e.y);
+      ctx.rotate(e.ang || 0);
+      const full = e.len || 150;
+      const L = e.hit ? Math.max(12, full * Math.min(1, k*3.2))
+                      : Math.max(12, full * (0.5 + k*0.6));
+      const wob = Math.sin(k * 6.5) * 13;
+      ctx.lineCap = 'round';
+      /* 靖蓝外皮 */
+      ctx.strokeStyle = hexA(e.color2 || '#3d5570', a*0.95);
+      ctx.lineWidth = 12 * (1 - k*0.2);
+      ctx.beginPath();
+      ctx.moveTo(10, 0);
+      ctx.quadraticCurveTo(L*0.55, wob*0.7, L, 0);
+      ctx.stroke();
+      /* 灰白内芯 */
+      ctx.strokeStyle = hexA(e.color || '#e2e6ea', a);
+      ctx.lineWidth = 6.5 * (1 - k*0.25);
+      ctx.beginPath();
+      ctx.moveTo(14, 0);
+      ctx.quadraticCurveTo(L*0.55, wob*0.7, L, 0);
+      ctx.stroke();
+      /* 沿着触手的缝合针脚 */
+      ctx.strokeStyle = hexA(e.color2 || '#3d5570', a*0.9);
+      ctx.lineWidth = 1.6;
+      for (let i = 1; i <= 8; i++){
+        const t2 = i/9;
+        const px = 10 + (L - 10)*t2;
+        const py = wob*0.7*t2*(1-t2)*4;
+        ctx.beginPath();
+        ctx.moveTo(px - 3, py - 5.5);
+        ctx.lineTo(px + 3, py + 5.5);
+        ctx.stroke();
+      }
+      ctx.lineCap = 'butt';
+      /* 命中：末端紫黑冲击 */
+      if (e.hit && k > 0.45){
+        const kk = (k - 0.45)/0.55;
+        ctx.beginPath(); ctx.arc(L, 0, 14 + kk*95, 0, TAU);
+        ctx.strokeStyle = `rgba(150,100,235,${(1-kk)*0.95})`;
+        ctx.lineWidth = 6*(1-kk) + 1;
+        ctx.stroke();
+        const hg = ctx.createRadialGradient(L, 0, 2, L, 0, 40);
+        hg.addColorStop(0, `rgba(190,150,255,${(1-kk)*0.8})`);
+        hg.addColorStop(1, 'rgba(70,20,140,0)');
+        ctx.beginPath(); ctx.arc(L, 0, 40, 0, TAU); ctx.fillStyle = hg; ctx.fill();
+      }
       ctx.restore();
     }
     else if (e.type === 'heal'){
@@ -4893,6 +6018,72 @@ function drawEffects(){
       ctx.restore();
     }
   }
+}
+
+/* ★ 摊开的手掌轮廓（自闭圆顿裹中央）+ 缝合线 */
+function drawMahitoHand(cx, cy, S, alpha){
+  if (!(S > 0)) return;
+  const line   = `rgba(226,230,234,${Math.min(1, alpha*1.9)})`;
+  const stitch = `rgba(61,85,112,${Math.min(1, alpha*2.0)})`;
+  ctx.save();
+  ctx.translate(cx, cy);
+
+  /* 掌心光晕 */
+  const g = ctx.createRadialGradient(0,0, S*0.05, 0,0, S*1.05);
+  g.addColorStop(0, `rgba(150,100,235,${alpha*0.5})`);
+  g.addColorStop(1, 'rgba(110,50,200,0)');
+  ctx.beginPath(); ctx.arc(0,0, S*1.05, 0, TAU);
+  ctx.fillStyle = g; ctx.fill();
+
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  ctx.strokeStyle = line;
+  ctx.lineWidth = Math.max(3, S*0.085);
+
+  /* 五指：从掌心向外摊开 */
+  const fingers = [
+    { a: -Math.PI*0.92, l: 0.60 },
+    { a: -Math.PI*0.70, l: 0.96 },
+    { a: -Math.PI*0.50, l: 1.04 },
+    { a: -Math.PI*0.30, l: 0.94 },
+    { a: -Math.PI*0.10, l: 0.76 },
+  ];
+  for (const f of fingers){
+    const dx = Math.cos(f.a), dy = Math.sin(f.a);
+    ctx.beginPath();
+    ctx.moveTo(dx*S*0.10, dy*S*0.10);
+    ctx.lineTo(dx*S*f.l, dy*S*f.l);
+    ctx.stroke();
+  }
+
+  /* 掌心轮廓（用缩放圆的椭圆） */
+  ctx.save();
+  ctx.scale(1, 1.12);
+  ctx.beginPath(); ctx.arc(0, S*0.06, S*0.46, 0, TAU); ctx.stroke();
+  ctx.restore();
+
+  /* 掌心缝合线 + 交叉针脚 */
+  ctx.strokeStyle = stitch;
+  ctx.lineWidth = Math.max(2, S*0.05);
+  ctx.beginPath(); ctx.moveTo(-S*0.36, -S*0.10); ctx.lineTo(S*0.34, -S*0.02); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(-S*0.30,  S*0.28); ctx.lineTo(S*0.28,  S*0.34); ctx.stroke();
+  ctx.lineWidth = Math.max(1.5, S*0.032);
+  for (let i = -3; i <= 3; i++){
+    const x = i * S*0.10;
+    ctx.beginPath();
+    ctx.moveTo(x - S*0.035, -S*0.17);
+    ctx.lineTo(x + S*0.035,  S*0.03);
+    ctx.stroke();
+  }
+  for (let i = -3; i <= 2; i++){
+    const x = i * S*0.10 + S*0.05;
+    ctx.beginPath();
+    ctx.moveTo(x - S*0.035, S*0.22);
+    ctx.lineTo(x + S*0.035, S*0.42);
+    ctx.stroke();
+  }
+  ctx.lineCap = 'butt';
+  ctx.restore();
 }
 
 function hexA(hex, a){
@@ -5107,6 +6298,7 @@ const CD_FIELD = {
   mahoraga:['maho','mahoCd'], chimera:['chimera','chimeraCd'], space:['space','spaceCd'],
   shinuchi:['shinuchi','shinuchiCd'], sentence:['sentence','sentenceCd'],
   heaven:['heaven','heavenCd'], chain:['chain','chainCd'], fly:['fly','flyCd'],
+  itai:['itai','itaiCd'], human:['human','humanCd'], form:['form','formCd'],
   simpledomain:['sd','sdCd'],
 };
 
@@ -5163,12 +6355,24 @@ function updateButtons(){
     b.classList.toggle('cool', cool || !!extra);
   };
 
-  /* ★ 简易领域 / 弥虚葛笼：冷却中 / 已展开 / 咒力不足 / 术式被禁 → 置灰 */
+  /* ★ 简易领域 / 弥虚葛笼：
+     —— 未展开：CD 中 / 咒力不足 / 术式被禁 → 置灰
+     —— 展开中：变成「引爆」键（不再置灰，且闪烁提醒可以收束） */
   if (btns.simpledomain && finite(CFG[p.type].sdCost)){
     const c = CFG[p.type];
-    setCool('simpledomain', p.cd.sd > 0 || !!p.sd || p.skillLock > 0, p.ce < c.sdCost);
-    btns.simpledomain.classList.toggle('ready',
-      p.cd.sd <= 0 && !p.sd && p.skillLock <= 0 && p.ce >= c.sdCost);
+    const sd = p.sd;
+    const live = !!(sd && sd.t < sd.dur);          /* 可引爆窗口 */
+    const b = btns.simpledomain;
+    setCool('simpledomain', live ? false : (p.cd.sd > 0 || !!sd || p.skillLock > 0),
+      live ? false : p.ce < c.sdCost);
+    b.classList.toggle('ready', live ||
+      (p.cd.sd <= 0 && !sd && p.skillLock <= 0 && p.ce >= c.sdCost));
+    /* ★ 文案随状态切换：展开中 → 「引爆 ×N」 */
+    if (b._labelEl){
+      const want = live ? ('引爆' + (sd.charge > 0 ? ' ×' + sd.charge : '')) : b._baseLabel;
+      if (b._labelEl.textContent !== want) b._labelEl.textContent = want;
+      b.classList.toggle('burstable', live);
+    }
   }
 
   if (p.type === 'gojo'){
@@ -5218,6 +6422,17 @@ function updateButtons(){
       btns.chain.classList.toggle('ready', !sealed && p.cd.chain <= 0 && p.ce >= c.chainCost);
     if (btns.fly)
       btns.fly.classList.toggle('ready', !sealed && p.cd.fly <= 0 && p.ce >= c.flyCost);
+  } else if (p.type === 'mahito'){
+    const c = CFG.mahito;
+    /* ★ 审判封印期间：除普攻外全部置灰 */
+    const sealed = p.skillLock > 0;
+    setCool('itai',  sealed || p.cd.itai > 0,  p.ce < c.itaiCost);
+    setCool('human', sealed || p.cd.human > 0, p.ce < c.humanCost);
+    setCool('form',  sealed || p.cd.form > 0 || p.formT > 0, p.ce < c.formCost);
+    setCool('domain', sealed || p.cd.domain > 0 || !!p.domain, p.ce < c.domainCost);
+    if (btns.itai)  btns.itai.classList.toggle('ready',  !sealed && p.cd.itai <= 0  && p.ce >= c.itaiCost);
+    if (btns.human) btns.human.classList.toggle('ready', !sealed && p.cd.human <= 0 && p.ce >= c.humanCost);
+    if (btns.form)  btns.form.classList.toggle('ready',  !sealed && p.cd.form <= 0  && p.formT <= 0 && p.ce >= c.formCost);
   } else {
     const c = CFG.sukunaTs;
     setCool('nue', p.cd.nue > 0, p.ce < c.nueCost);
@@ -5275,6 +6490,7 @@ window.addEventListener('touchstart', tryLockLandscape, { once: true });
   const mb = document.getElementById('muteBtn');
   if (mb) mb.addEventListener('click', e => { e.stopPropagation(); toggleMute(); });
 }
+loadSettings();          /* ★ 先读取设置，音效池按保存的音量创建 */
 preloadSfx();
 updateMuteBtn();
 showMenu();

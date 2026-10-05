@@ -54,8 +54,38 @@
       <span class="btn-text">演示模式</span>
       <span class="btn-desc">双方角色可选 · 自动对战</span>
     </button>
+    <button class="menu-btn" id="settingsBtn">
+      <span class="btn-icon">⚙</span>
+      <span class="btn-text">设置</span>
+      <span class="btn-desc">音效音量 · 自动防御</span>
+    </button>
   </div>
   <div id="menuToast" class="toast"></div>
+</div>
+
+<!-- ★ 设置窗口 -->
+<div id="settingsScreen" class="screen hidden">
+  <div class="select-title">设 置</div>
+  <div class="select-hint">调整音效音量与辅助功能 · 设置会自动保存</div>
+  <div class="set-body">
+    <div class="set-row">
+      <div class="set-head">
+        <span class="set-label">音效音量</span>
+        <span class="set-val" id="volVal">55%</span>
+      </div>
+      <input id="volRange" class="set-range" type="range" min="0" max="100" step="1" value="55">
+    </div>
+    <div class="set-row">
+      <div class="set-head">
+        <span class="set-label">自动防御</span>
+        <button id="autoDefBtn" class="al-btn on">开</button>
+      </div>
+      <div class="set-hint">敌方领域降临时自动展开「简易领域 / 弥虚葛笼」；五条悟自动维持「无下限」</div>
+    </div>
+  </div>
+  <div class="select-actions">
+    <button id="settingsBackBtn" class="menu-btn primary small">完 成</button>
+  </div>
 </div>
 
 <div id="selectScreen" class="screen hidden">
@@ -95,6 +125,12 @@
           <div class="char-role">近战 · 无咒力</div>
           <div class="char-desc">天逆鉾/万里锁<br>天与咒缚 · 领域免疫</div>
         </div>
+        <div class="char-card" data-char="mahito">
+          <div class="char-avatar mahito-avatar">真</div>
+          <div class="char-name">真人</div>
+          <div class="char-role">近战 · 变形</div>
+          <div class="char-desc">无为转变/改造人类<br>内体变形 · 自闭圆顿裹</div>
+        </div>
       </div>
     </div>
     <div class="select-vs">VS</div>
@@ -130,6 +166,12 @@
           <div class="char-name">伏黑甚尔</div>
           <div class="char-role">近战 · 无咒力</div>
           <div class="char-desc">天逆鉾/万里锁<br>天与咒缚 · 领域免疫</div>
+        </div>
+        <div class="char-card" data-char="mahito">
+          <div class="char-avatar mahito-avatar">真</div>
+          <div class="char-name">真人</div>
+          <div class="char-role">近战 · 变形</div>
+          <div class="char-desc">无为转变/改造人类<br>内体变形 · 自闭圆顿裹</div>
         </div>
       </div>
     </div>
