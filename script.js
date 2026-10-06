@@ -88,6 +88,7 @@ const SFX_CHAR = {
     spawn:        ['sukunaTS/spawn1.ogg', 'sukunaTS/spawn2.ogg', 'sukunaTS/spawn3.ogg'], /* 召唤式神：随机 */
     mahoragaAtk:  ['sukunaTS/mahoragaAtk.ogg'],                /* 魔虚罗攻击 */
     mahoragaAdapt:['sukunaTS/mahoragaAdapt.ogg'],              /* 魔虚罗适应触发 */
+    space:        ['sukunaTS/space.ogg'],                      /* ★ 空间斩（魔虚罗陨落后解锁） */
     chimeraAtk:   ['sukunaTS/chimeraAtk1.ogg', 'sukunaTS/chimeraAtk2.ogg'],             /* 嵌合兽攻击：随机 */
   },
 };
@@ -360,9 +361,11 @@ const CFG = {
        无量空处 / 伏魔御厨子 各 4 秒后即可适应（已增强，原为 5 / 4 秒） */
     mahoDomAdaptGojo: 4.0, mahoDomAdaptSukuna: 4.0,
     mahoDomAdaptDR: 0.70, mahoDomAdaptSlow: 0.50,
-    /* ★ 引力适应（苍 / 诛伏赐死的「拘传」）：累计 mahoPullAdaptStart 秒后开始产生抗性，
-       到 mahoPullAdaptFull 秒完全免疫吸引力（另一条时间制适应线，与领域适应并列） */
+    /* ★ 引力适应（苍 / 诛伏赐死的「拘传」）：累计 start 秒后开始产生抗性，
+       到 full 秒完全免疫吸引力（另一条时间制适应线，与领域适应并列）
+       —— 苍比拘传更快适应（苍 2.5s→4.5s，拘传 4s→7s） */
     mahoPullAdaptStart: 4.0, mahoPullAdaptFull: 7.0,
+    mahoPullAdaptBlueStart: 2.5, mahoPullAdaptBlueFull: 4.5,
     /* ★ 魔虚罗陨落时，把适应成果转移给十影宿傩（自适应减伤 + 身后法环） */
     mahoTransferStep: 0.05, mahoTransferMax: 0.40,
     /* ★ 嵌合兽：与魔虚罗同体积（r=40）的橙色兽，攻击逻辑类似玉犬（贴身撕咬，有时限）
@@ -601,6 +604,7 @@ function createFighter(type, x, y){
     adaptDR: 0,            // 自适应减伤（所有来源）
     adaptDomain: null,     // { gojo: 秒, sukuna: 秒 } 对领域的适应进度
     pullAdapt: { blue: 0, higuruma: 0 },  // ★ 引力适应进度（苍 / 拘传，从陨落的魔虚罗继承）
+    mahoAdaptSave: null,   // ★ 上一只魔虚罗的完整适应结果（下次召唤时由新魔虚罗继承）
     mahoWheel: false,      // ★ 身后是否挂着继承来的法环（再次召唤魔虚罗时移除）
   };
 }
@@ -1069,7 +1073,7 @@ const CHAR_INFO = {
       ['脱兔', 'T · 每次召唤 4 只脱兔（无上限），自动靠拢敌人'],
       ['鵺', 'Q · 追踪雷电鸟'],
       ['玉犬', 'E · 召唤 2 只玉犬（各 120 HP）'],
-      ['魔虚罗', 'R · 白球+法轮，会适应减伤；场上限 1 只<br>同一攻击累计命中 4 次即达减伤上限 85%；无量空处 / 伏魔御厨子 各待 4 秒即可适应<br>被「苍」或诛伏赐死的「拘传」拽住累计 4 秒起产生抗性，7 秒后完全免疫引力<br>持续回血 14/s，每次「适应完遂」额外回复 50<br>陨落后法环寄宿在自身身后，适应与引力抗性一并继承，直到下次召唤魔虚罗'],
+      ['魔虚罗', 'R · 白球+法轮，会适应减伤；场上限 1 只<br>同一攻击累计命中 4 次即达减伤上限 85%；无量空处 / 伏魔御厨子 各待 4 秒即可适应<br>它待在领域里的适应进度会实时同步给自己，不必等它陨落<br>被「苍」拽住 2.5 秒起产生抗性、4.5 秒完全免疫；被诛伏赐死的「拘传」则需 4 秒 / 7 秒<br>持续回血 14/s，每次「适应完遂」额外回复 50<br>每次重新召唤的魔虚罗会继承上一次的全部适应成果（越打越熟）'],
       ['嵌合兽', 'V · 橙色巨躯（与魔虚罗同体积），贴身撕咬；12 秒后消散'],
       ['空间斩', 'F · 魔虚罗陨落后解锁，命中即巨额伤害'],
       ['弥虚葛笼', 'C · 脚下展开绿色圆环（跟随移动，基础 4 秒）盾住敌方领域（含己方式神）<br>再按 C 引爆：伤害随「蓄势」层数提升，并大幅返还冷却<br>在敌方领域内抗衡会持续消耗咒力；敌方领域刚开 1.2 秒内响应 = 完美展开'],
@@ -2058,6 +2062,28 @@ function tsMahoraga(s){
   s.ce -= c.mahoCost;
   s.cd.maho = c.mahoCd;
   const facing = finite(s.facing) ? s.facing : 0;
+  /* ★ 继承上一次魔虚罗的完整适应结果（同一只十影宿傩可跨多次召唤累积）
+     —— 伤害来源层数 / 领域适应秒数 / 引力适应秒数 / 已完遂记录 一并带过来 */
+  const save = s.mahoAdaptSave || null;
+  const adapt0 = {};
+  if (save && save.adapt)
+    for (const k in save.adapt)
+      if (finite(save.adapt[k]) && save.adapt[k] > 0) adapt0[k] = save.adapt[k];   /* 过滤 NaN / 0 */
+  const adaptFull0 = (save && save.adaptFull) ? Object.assign({}, save.adaptFull) : null;
+  const dom0 = {
+    gojo:   (save && save.domAdapt && finite(save.domAdapt.gojo))   ? save.domAdapt.gojo   : 0,
+    sukuna: (save && save.domAdapt && finite(save.domAdapt.sukuna)) ? save.domAdapt.sukuna : 0,
+  };
+  const pull0 = {
+    blue:     (save && save.pullAdapt && finite(save.pullAdapt.blue))     ? save.pullAdapt.blue     : 0,
+    higuruma: (save && save.pullAdapt && finite(save.pullAdapt.higuruma)) ? save.pullAdapt.higuruma : 0,
+  };
+  let inheritKinds = 0;
+  for (const k in adapt0) if (adapt0[k] > 0) inheritKinds++;
+  if (dom0.gojo > 0) inheritKinds++;
+  if (dom0.sukuna > 0) inheritKinds++;
+  if (pull0.blue > 0) inheritKinds++;
+  if (pull0.higuruma > 0) inheritKinds++;
   summons.push({
     type: 'mahoraga',
     owner: s,
@@ -2073,9 +2099,10 @@ function tsMahoraga(s){
     stun: 0,
     attackInterval: 1.0,
     angle: facing,
-    adapt: {},        /* ★ 适应：伤害来源 → 已适应层数 */
-    domAdapt: { gojo: 0, sukuna: 0 },  /* ★ 在各类领域中累计待过的秒数 */
-    pullAdapt: { blue: 0, higuruma: 0 }, /* ★ 引力适应：被苍 / 拘传拽住的累计秒数 */
+    adapt: adapt0,        /* ★ 适应：伤害来源 → 已适应层数（继承上次的结果） */
+    adaptFull: adaptFull0,/* ★ 已「适应完遂」过的能力：不重复触发回血 */
+    domAdapt: dom0,       /* ★ 在各类领域中累计待过的秒数（含继承） */
+    pullAdapt: pull0,     /* ★ 引力适应：被苍 / 拘传拽住的累计秒数（含继承） */
     chaseT: 0,        /* ★ 连续追击计时：越追越快 */
     slowT: 0, slowMul: 1,
     slashAnim: 0,     /* ★ 砍击动作计时 */
@@ -2088,6 +2115,17 @@ function tsMahoraga(s){
       color:'#ffd76a', width:4 });
     addEffect({ type:'text', x:s.x, y:s.y-52, t:0, life:1.2,
       text:'法环 · 归还魔虚罗', color:'#ffe6a8', size:13 });
+  }
+  /* ★ 继承上次适应的反馈 */
+  if (inheritKinds > 0){
+    let best = 0;
+    for (const k in adapt0) best = Math.max(best, adapt0[k] || 0);
+    const need = Math.max(1, Math.round(c.mahoAdaptNeed || 1));
+    addEffect({ type:'ring', x:s.x, y:s.y, t:0, life:0.7, r0:s.r*0.6, r1:s.r*3.6,
+      color:'#ffd76a', width:4 });
+    addEffect({ type:'text', x:s.x, y:s.y-92, t:0, life:2.0,
+      text:'魔虚罗 · 继承上次适应' + (best > 0 ? '（层次 ' + Math.min(best, need) + '/' + need + '）' : ''),
+      color:'#ffe6a8', size:14 });
   }
   playSfx('spawn', s.type, s === player ? 1 : 0.55);   /* ★ 召唤式神音效（随机） */
   addEffect({ type:'ring', x:s.x, y:s.y, t:0, life:0.9, r0:20, r1:220, color:'#ffd76a', width:8 });
@@ -2156,6 +2194,7 @@ function tsSpaceSlash(s, target){
   });
   addEffect({ type:'ring', x:s.x, y:s.y, t:0, life:0.4, r0:10, r1:130, color:'#ffe9a8', width:6 });
   addEffect({ type:'text', x:s.x, y:s.y-74, t:0, life:1.1, text:'空间斩', color:'#fff0b0', size:22 });
+  playSfx('space', s.type, s === player ? 1 : 0.6);     /* ★ 空间斩音效 */
   G.shake = Math.max(G.shake, 14);
 }
 
@@ -3924,9 +3963,12 @@ function removeSummon(i, s){
     const dr = Math.min(c2.mahoTransferMax, stacks * c2.mahoTransferStep);
     const ow = s.owner;
     ow.adaptDR = Math.max(ow.adaptDR || 0, dr);
+    /* ★ 领域适应取较大值（避免第二只魔虚罗进度更少时把已同步的进度冲掉） */
+    if (!ow.adaptDomain) ow.adaptDomain = { gojo: 0, sukuna: 0 };
+    const oldAd = ow.adaptDomain;
     ow.adaptDomain = {
-      gojo:   s.domAdapt ? s.domAdapt.gojo   : 0,
-      sukuna: s.domAdapt ? s.domAdapt.sukuna : 0,
+      gojo:   Math.max(finite(oldAd.gojo)   ? oldAd.gojo   : 0, s.domAdapt ? (finite(s.domAdapt.gojo)   ? s.domAdapt.gojo   : 0) : 0),
+      sukuna: Math.max(finite(oldAd.sukuna) ? oldAd.sukuna : 0, s.domAdapt ? (finite(s.domAdapt.sukuna) ? s.domAdapt.sukuna : 0) : 0),
     };
     /* ★ 引力适应（苍 / 拘传）同步给十影宿傩 */
     if (s.pullAdapt){
@@ -3953,6 +3995,33 @@ function removeSummon(i, s){
       addEffect({ type:'text', x:ow.x, y:ow.y-126, t:0, life:2.4,
         text:'魔虚罗的适应已继承 · 自适应减伤 ' + Math.round(dr*100) + '%', color:'#ffd76a', size:15 });
       playSfx('mahoragaAdapt', ow.type, 1);
+    }
+    /* ★ 同时把这只魔虚罗的完整适应结果存档 → 下次召唤的魔虚罗会继承
+       （与旧存档取最大值合并，所以同一只十影宿傩越打越熟，不会倒退） */
+    {
+      const old = ow.mahoAdaptSave || null;
+      const merged = { adapt: {}, adaptFull: {}, domAdapt: { gojo: 0, sukuna: 0 }, pullAdapt: { blue: 0, higuruma: 0 } };
+      const mixAdapt = src => { if (src) for (const k in src) merged.adapt[k] = Math.max(merged.adapt[k] || 0, src[k] || 0); };
+      const mixFull  = src => { if (src) for (const k in src) if (src[k]) merged.adaptFull[k] = true; };
+      const mixDom   = src => {
+        if (!src) return;
+        merged.domAdapt.gojo   = Math.max(merged.domAdapt.gojo,   finite(src.gojo)   ? src.gojo   : 0);
+        merged.domAdapt.sukuna = Math.max(merged.domAdapt.sukuna, finite(src.sukuna) ? src.sukuna : 0);
+      };
+      const mixPull  = src => {
+        if (!src) return;
+        merged.pullAdapt.blue     = Math.max(merged.pullAdapt.blue,     finite(src.blue)     ? src.blue     : 0);
+        merged.pullAdapt.higuruma = Math.max(merged.pullAdapt.higuruma, finite(src.higuruma) ? src.higuruma : 0);
+      };
+      if (old){ mixAdapt(old.adapt); mixFull(old.adaptFull); mixDom(old.domAdapt); mixPull(old.pullAdapt); }
+      mixAdapt(s.adapt); mixFull(s.adaptFull); mixDom(s.domAdapt); mixPull(s.pullAdapt);
+      ow.mahoAdaptSave = merged;
+      let kinds = 0;
+      for (const k in merged.adapt) if (merged.adapt[k] > 0) kinds++;
+      if (kinds > 0 || merged.pullAdapt.blue > 0 || merged.pullAdapt.higuruma > 0){
+        addEffect({ type:'text', x:ow.x, y:ow.y-86, t:0, life:2.4,
+          text:'下次召唤的魔虚罗将继承这些适应', color:'#ffe6a8', size:13 });
+      }
     }
   }
 
@@ -4299,16 +4368,29 @@ function summonProtected(s){
 
 /* ══════════════════════════════════════════
    ★ 引力适应：魔虚罗被「苍」或日车宽见领域的「拘传」拽住时，按时间积累抗性
-   —— 累计 mahoPullAdaptStart(4)s 后开始产生抗性，到 mahoPullAdaptFull(7)s 完全免疫
+   —— 累计 start 秒后开始产生抗性，到 full 秒完全免疫
+      苍：mahoPullAdaptBlueStart 2.5s → mahoPullAdaptBlueFull 4.5s（更快）
+      拘传：mahoPullAdaptStart 4.0s → mahoPullAdaptFull 7.0s
    —— 陨落后同步给十影宿傩（见 removeSummon）
    ══════════════════════════════════════════ */
+function pullAdaptSpan(key){
+  const c = CFG.sukunaTs;
+  const dStart = finite(c.mahoPullAdaptStart) ? c.mahoPullAdaptStart : 4.0;
+  const dFull  = finite(c.mahoPullAdaptFull)  ? c.mahoPullAdaptFull  : 7.0;
+  if (key === 'blue'){
+    return {
+      start: finite(c.mahoPullAdaptBlueStart) ? c.mahoPullAdaptBlueStart : dStart,
+      full:  finite(c.mahoPullAdaptBlueFull)  ? c.mahoPullAdaptBlueFull  : dFull,
+    };
+  }
+  return { start: dStart, full: dFull };
+}
 function pullAdaptRate(f, key){
   if (!f || !f.pullAdapt) return 0;
   const t = f.pullAdapt[key];
   if (!finite(t)) return 0;
-  const c = CFG.sukunaTs;
-  const span = Math.max(0.01, c.mahoPullAdaptFull - c.mahoPullAdaptStart);
-  return clamp((t - c.mahoPullAdaptStart) / span, 0, 1);
+  const sp = pullAdaptSpan(key);
+  return clamp((t - sp.start) / Math.max(0.01, sp.full - sp.start), 0, 1);
 }
 /* 引力强度倍率：1 = 完全被拽住，0 = 完全不受影响 */
 function pullResistMul(f, key){ return 1 - pullAdaptRate(f, key); }
@@ -4318,17 +4400,17 @@ function tickPullAdapt(s, key, dt){
   if (!s || s.type !== 'mahoraga' || s.hp <= 0) return 1;
   if (!s.pullAdapt) s.pullAdapt = { blue: 0, higuruma: 0 };
   if (!finite(s.pullAdapt[key])) s.pullAdapt[key] = 0;
-  const c = CFG.sukunaTs;
+  const sp = pullAdaptSpan(key);
   const before = s.pullAdapt[key];
   s.pullAdapt[key] = before + dt;
   const now = s.pullAdapt[key];
   const nm = (key === 'blue') ? '苍之引力' : '拘传';
-  if (before < c.mahoPullAdaptStart && now >= c.mahoPullAdaptStart){
+  if (before < sp.start && now >= sp.start){
     playSfx('mahoragaAdapt', s.owner ? s.owner.type : 'sukunaTs', s.owner === player ? 1 : 0.5);
     addEffect({ type:'text', x:s.x, y:s.y - s.r - 46, t:0, life:1.8,
       text:'适应 · ' + nm + ' 抗性上升', color:'#ffd76a', size:13 });
   }
-  if (before < c.mahoPullAdaptFull && now >= c.mahoPullAdaptFull){
+  if (before < sp.full && now >= sp.full){
     playSfx('mahoragaAdapt', s.owner ? s.owner.type : 'sukunaTs', s.owner === player ? 1 : 0.5);
     addEffect({ type:'ring', x:s.x, y:s.y, t:0, life:0.7, r0:s.r * 0.6, r1:s.r * 3.2,
       color:'#ffd76a', width:5 });
@@ -4337,6 +4419,17 @@ function tickPullAdapt(s, key, dt){
     G.flash = Math.max(G.flash, 0.2);
   }
   return pullResistMul(s, key);
+}
+
+/* ★ 魔虚罗在领域里的适应进度实时同步给主人（十影宿傩）：取较大值，不会倒退 */
+function syncDomainAdaptToOwner(s, key){
+  const ow = s && s.owner;
+  if (!ow || !s.domAdapt) return;
+  const v = s.domAdapt[key];
+  if (!finite(v) || v <= 0) return;
+  if (!ow.adaptDomain) ow.adaptDomain = { gojo: 0, sukuna: 0 };
+  if (!finite(ow.adaptDomain[key])) ow.adaptDomain[key] = 0;
+  ow.adaptDomain[key] = Math.max(ow.adaptDomain[key], v);
 }
 
 /* ══════════════════════════════════════════
@@ -4387,10 +4480,14 @@ function applyDomainToSummons(owner, dt){
         const before = s.domAdapt.gojo;
         s.domAdapt.gojo = before + dt;
         resist = clamp(s.domAdapt.gojo / c2.mahoDomAdaptGojo, 0, 1);
+        syncDomainAdaptToOwner(s, 'gojo');       /* ★ 实时同步给十影宿傩 */
         if (before < c2.mahoDomAdaptGojo && s.domAdapt.gojo >= c2.mahoDomAdaptGojo){
           playSfx('mahoragaAdapt', s.owner ? s.owner.type : 'sukunaTs', s.owner === player ? 1 : 0.5);
           addEffect({ type:'text', x:s.x, y:s.y - s.r - 34, t:0, life:1.8,
             text:'适应 · 无量空处（可行动）', color:'#ffd76a', size:13 });
+          /* ★ 同一时刻主人也获得了这个适应（不再需要等魔虚罗陨落） */
+          if (s.owner) addEffect({ type:'text', x:s.owner.x, y:s.owner.y-52, t:0, life:1.8,
+            text:'无量空处适应 · 已同步', color:'#c9a4ff', size:12 });
         }
       }
       const stun = 2 * (1 - resist);
@@ -4408,10 +4505,13 @@ function applyDomainToSummons(owner, dt){
         const before = s.domAdapt.sukuna;
         s.domAdapt.sukuna = before + dt;
         dr = clamp(s.domAdapt.sukuna / c2.mahoDomAdaptSukuna, 0, 1) * c2.mahoDomAdaptDR;
+        syncDomainAdaptToOwner(s, 'sukuna');      /* ★ 实时同步给十影宿傩 */
         if (before < c2.mahoDomAdaptSukuna && s.domAdapt.sukuna >= c2.mahoDomAdaptSukuna){
           playSfx('mahoragaAdapt', s.owner ? s.owner.type : 'sukunaTs', s.owner === player ? 1 : 0.5);
           addEffect({ type:'text', x:s.x, y:s.y - s.r - 34, t:0, life:1.8,
             text:'适应 · 伏魔御厨子（减伤 ' + Math.round(c2.mahoDomAdaptDR*100) + '%）', color:'#ffd76a', size:13 });
+          if (s.owner) addEffect({ type:'text', x:s.owner.x, y:s.owner.y-52, t:0, life:1.8,
+            text:'伏魔御厨子适应 · 已同步', color:'#ff9a9a', size:12 });
         }
       }
       damageSummon(s, dps * dt * (1 - dr), 'domain', true);
