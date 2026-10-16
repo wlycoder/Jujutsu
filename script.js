@@ -145,8 +145,10 @@ function playSfx(act, type, vol){
 
     const p = sfxGet(file);
     if (!p.list.length) return;
-    p.idx = (p.idx + 1) % p.list.length;
+    /* ★ 先用「已预热」的第 0 个副本，再向下轮转
+       —— 旧写法先自增再取，首次播放会用到没预热的副本，起播会慢一拍 */
     const a = p.list[p.idx];
+    p.idx = (p.idx + 1) % p.list.length;
     a.volume = clamp(SFX_VOL * (vol === undefined ? 1 : vol), 0, 1);
     try { a.currentTime = 0; } catch(_){}
     const pr = a.play();
@@ -309,7 +311,7 @@ const CFG = {
     domainBaseR: 365, domainOpenTime: 0.45, domainGrowRate: 0,
     domainMaxR: 365, domainDuration: 5.2, domainDps: 0,
     /* ★ 站在自己领域内时的攻击力倍率（各角色不同） */
-    domainAtkBuff: 1.35,
+    domainAtkBuff: 1.45,
     brainBreakCost: 0.18, brainBreakStun: 0.45,
     brainBleed: 0.06, brainBreakMinHp: 0.28,
     /* ★ 黑闪：近战普攻把「打击」与「咒力」的时差压到极限 */
@@ -330,7 +332,7 @@ const CFG = {
     domainCost: 60, domainCd: 38,
     domainName: '伏魔御厨子',
     domainBaseR: 390, domainOpenTime: 0.5, domainGrowRate: 78,
-    domainMaxR: 1600, domainDuration: 8.5, domainDps: 34,
+    domainMaxR: 1600, domainDuration: 8.5, domainDps: 54,
     /* ★ 站在自己领域内时的攻击力倍率（各角色不同） */
     domainAtkBuff: 1.30,
     /* ★ 弥虚葛笼：身下生成跟随移动的绿色圆环，4 秒内免疫敌方领域 */
@@ -2181,6 +2183,8 @@ function tsSpaceSlash(s, target){
 
   s.ce -= c.spaceCost;
   s.cd.space = c.spaceCd;
+  /* ★ 音效在「确认发出」的第一时间就播放（早于弹道与特效的生成），保证零延迟 */
+  playSfx('space', s.type, s === player ? 1 : 0.6);
 
   const aim = acquireAim(s, target);
   const ang = aim ? Math.atan2(aim.y-s.y, aim.x-s.x) : (finite(s.facing) ? s.facing : 0);
@@ -2194,7 +2198,6 @@ function tsSpaceSlash(s, target){
   });
   addEffect({ type:'ring', x:s.x, y:s.y, t:0, life:0.4, r0:10, r1:130, color:'#ffe9a8', width:6 });
   addEffect({ type:'text', x:s.x, y:s.y-74, t:0, life:1.1, text:'空间斩', color:'#fff0b0', size:22 });
-  playSfx('space', s.type, s === player ? 1 : 0.6);     /* ★ 空间斩音效 */
   G.shake = Math.max(G.shake, 14);
 }
 
