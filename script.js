@@ -118,6 +118,8 @@ function sfxGet(file){
       const a = new Audio(AUDIO_BASE + file);
       a.preload = 'auto';
       a.volume = SFX_VOL;
+      /* ★ 禁止远程/投射播放（AirPlay 等），避免音频被当成媒体接管系统播放 */
+      try { a.disableRemotePlayback = true; } catch(_){}
       p.list.push(a);
     }
   } catch(_){}
@@ -156,11 +158,30 @@ function playSfx(act, type, vol){
   } catch(_){}
 }
 
+/* ★ iOS（Safari 16.4+）：把页面的音频会话类型设为 ambient
+   —— 与其它 App 的音频混音、不接管后台播放、也不会在控制中心里占据「正在播放」
+   —— 不支持 navigator.audioSession 的浏览器直接忽略
+   （若想让音效忽略静音开关，把 'ambient' 换成 'transient'） */
+function setupIosAudioSession(){
+  try {
+    const s = navigator.audioSession;
+    if (s && 'type' in s) s.type = 'ambient';
+  } catch(_){}
+  /* 顺手清空媒体会话，避免音效被系统当成「正在播放的媒体」 */
+  try {
+    if (navigator.mediaSession){
+      navigator.mediaSession.metadata = null;
+      navigator.mediaSession.playbackState = 'none';
+    }
+  } catch(_){}
+}
+
 /* ★ 首次交互时解锁播放权限（移动端必须由用户手势触发）
    每个音效只预热第一个副本，避免页面加载时产生大量被中断的请求 */
 function unlockSfx(){
   if (sfxUnlocked) return;
   sfxUnlocked = true;
+  setupIosAudioSession();          /* ★ 手势后再确认一次音频会话类型 */
   for (const f in sfxPool){
     const a = sfxPool[f].list[0];
     if (!a) continue;
@@ -483,11 +504,11 @@ const INTRO_QUOTES = {
   gojo: {
     self: '事先声明一下，你才是挑战者',
     retort: {
-      gojo: '镜子里的人，也想当最强？',
+      gojo: '天上天下，为我独尊。至于你，不过是幻影罢了',
       sukuna: '事先声明一下，你才是挑战者',
-      sukunaTs: '十种影子？那就一起上吧，反正结果一样',
+      sukunaTs: '你还留着那张脸，是打算让我手下留情？',
       higuruma: '法官先生，我可没打算接受你的审判',
-      toji: '术式都省了？那就用拳头说话',
+      toji: '是吗？是哦……也许是吧！',
       mahito: '灵魂的形状？那可不由你说了算',
     },
   },
@@ -498,16 +519,16 @@ const INTRO_QUOTES = {
       sukuna: '本王可没有第二个',
       sukunaTs: '区区十影，也配与本王同名',
       higuruma: '你的判决，本王一概不受',
-      toji: '没有咒力的杂鱼，也敢挡在本王面前',
+      toji: '没有咒力的家伙，反倒是让我兴奋起来了',
       mahito: '会缝线的咒灵？倒是有点意思',
     },
   },
   sukunaTs: {
-    self: '十种影子，尽归我手',
+    self: '魔虚罗，你还要',
     retort: {
       gojo: '天上天下，唯我独尊——那就先从你斩起',
       sukuna: '影中之影，今日便吞了你',
-      sukunaTs: '影子对影子，看谁的更深',
+      sukunaTs: '有趣有趣，本王倒要看看你能撑多久',
       higuruma: '法庭？把法官一并斩了便是',
       toji: '没有术式的身体，斩起来最省事',
       mahito: '灵魂的术式？那就把你的形状也一并斩开',
@@ -517,9 +538,9 @@ const INTRO_QUOTES = {
     self: '开庭。被告，请陈述你的姓名与罪状',
     retort: {
       gojo: '开庭。被告，请陈述你的姓名与罪状',
-      sukuna: '判决无需被告同意',
+      sukuna: '杀人凶手，虐待生命，诸罪并罚，死刑宣判',
       sukunaTs: '藐视法庭，罪加一等',
-      higuruma: '同僚？那便由我来审你',
+      higuruma: '你试过穿着衣服洗澡吗？那感觉……好极了',
       toji: '被告，天逆鉾不是免罪符',
       mahito: '改造灵魂——这是对生命的亵渎，罪加一等',
     },
@@ -529,17 +550,17 @@ const INTRO_QUOTES = {
     retort: {
       gojo: '六眼？那正好，我讨厌天才',
       sukuna: '术式之王？我杀的就是这种',
-      sukunaTs: '十影的咒灵，也一并宰了',
+      sukunaTs: '那张脸……算了，只要能换钱就行',
       higuruma: '法庭？我连判决一起斩了',
       toji: '两个我？正好，一个也不留',
-      mahito: '缝合线？我连灵魂一起斩',
+      mahito: '我的灵魂可不由不得你做主',
     },
   },
   mahito: {
     self: '灵魂的形状，由我来定',
     retort: {
       gojo: '最强？那灵魂一定也很有趣',
-      sukuna: '诅咒之王？你我本就是同类',
+      sukuna: '诅咒之王？我才是新的诅咒之王！',
       sukunaTs: '十种影子，全都揉成一团吧',
       higuruma: '审判灵魂？先看看你自己的形状',
       toji: '天逆鉾啊……那就有点麻烦了',
@@ -1051,7 +1072,7 @@ const CHAR_INFO = {
       ['赫', 'E · 斥力球，命中强力击退；场上若有吸附型苍，则被其牵引'],
       ['茈', 'R · 需先释放 苍+赫，贯穿大伤害；赫 撞上吸附型苍 → 范围 480 紫色冲击波「茈」'],
       ['简易领域', 'C · 脚下展开绿色圆环（跟随移动，基础 4 秒）盾住敌方领域<br>再按 C 引爆：伤害随「蓄势」层数提升，并大幅返还冷却<br>在敌方领域内抗衡会持续消耗咒力；敌方领域刚开 1.2 秒内响应 = 完美展开'],
-      ['无量空处', '空格 · 领域，僵直敌方并封印领域 20 秒'],
+      ['无量空处', '空格 · 封闭式领域（r365 · 5.2 秒）：僵直敌方 2 秒并封印其领域 20 秒<br>结界壁会关住进入者 —— 只能在圈内活动，除非领域对拼中被打碎'],
       ['反转术式', 'H · 回复生命 / 修复受损大脑'],
       ['破脑', 'P · 自伤以重置领域冷却'],
     ],
@@ -1091,7 +1112,7 @@ const CHAR_INFO = {
       ['神槌', 'Q · 30 咒力 · 追击突进：够得到就贴身（最长 480）+ 70 伤害击退'],
       ['死刑宣告', 'E · 35 咒力 · 320 范围：目标 15 秒内受伤 +50%、移速 −25%'],
       ['反转术式', 'H · 35 咒力 · 回复 200 生命'],
-      ['诛伏赐死', '空格 · 领域：进入者 10 秒禁用所有主动术式，并被「拘传」拽向庭心'],
+      ['诛伏赐死', '空格 · 封闭式领域（r720 · 11 秒）：进入者 10 秒禁用所有主动术式，并被「拘传」拽向庭心<br>结界壁会关住进入者，除非领域对拼中被打碎'],
       ['追诉 / 审判', '有人被宣告死刑时自身移速 +20%；领域内自身移速 +30%、受伤 −30%'],
     ],
   },
@@ -1102,7 +1123,7 @@ const CHAR_INFO = {
       ['天逆鉾', 'Q · 7s CD · 远程弧形闪光 130 伤害，命中后目标 5 秒内无法使用术式与领域'],
       ['万里锁', 'E · 10s CD · 900 距离钩中敌人：60 伤害 + 拽向自己 + 眩晕 3 秒（对抗远程的核心）'],
       ['蝇头', 'T · 5s CD · 朝敌方扇形扑出 4 只棕黄小飞虫（70 HP、无攻击），替自己挡弹幕'],
-      ['天与咒缚', '被动 · 速度 355 全场最高；一切伤害 −25%；无法被任何领域「选中」；没有反转术式'],
+      ['天与咒缚', '被动 · 速度 355 全场最高；一切伤害 −25%；无法被任何领域「选中」，也关不进封闭式结界；没有反转术式'],
       ['无咒力', '被动 · 天与咒缚之躯不产生咒力，所有技能不消耗咒力，但依旧有冷却时间'],
     ],
   },
@@ -1119,7 +1140,7 @@ const CHAR_INFO = {
       ['改造人类', 'E · 35咒力 · 9s · 扇形掷出 3 只改造人（90 HP），自动追击敌人'],
       ['改造人类', 'E · 35咒力 · 9s · 扇形掷出 3 只改造人（90 HP），自动追击敌人'],
       ['内体变形', 'T · 20咒力 · 11s · 2.5 秒内免疫所有投射物，移速 +35%、攻击力 +25%'],
-      ['自闭圆顿裹', '空格 · 60咒力 · 30s · 领域：黑色球壳内一片紫黑，中央摊开一只缝合手掌；对敌人施加 3 秒灵魂改造'],
+      ['自闭圆顿裹', '空格 · 60咒力 · 30s · 封闭式领域（r400 · 9 秒）：黑色球壳内一片紫黑，中央摊开一只缝合手掌<br>对敌人施加 3 秒灵魂改造；结界壁会关住进入者，除非领域对拼中被打碎'],
       ['无反转术式', '被动 · 真人不掌握反转术式，只能靠无为转变自我修补'],
     ],
   },
@@ -2882,6 +2903,8 @@ function update(dt){
   updateProjectiles(dt);
   updateSummons(dt);
   updateDomains(dt);
+  /* ★ 封闭式领域：结界壁把进入者关在里面（唯一出路是领域对拼中被打碎） */
+  clampClosedDomains(dt);
   updateCamera();
   updateHUD();
   updateButtons();
@@ -4034,6 +4057,51 @@ function removeSummon(i, s){
 /* ══════════════════════════════════════════
    领域
    ══════════════════════════════════════════ */
+/* ══════════════════════════════════════════
+   ★ 封闭式领域（无量空处 / 自闭圆顿裹 / 诛伏赐死）
+   —— 结界壁会把「已经进圈的人」关在圈内：只能在圈内活动，走不出去
+   —— 唯一的出路是领域对拼中自身领域被打碎（checkDomainBreak → f.domain = null，
+      约束自动解除）；领域自然到期同理
+   —— 天与咒缚（伏黑甚尔）无咒力，结界既选不中他也关不住他
+   ══════════════════════════════════════════ */
+const CLOSED_DOMAINS = { gojo: true, mahito: true, higuruma: true };
+
+function closedDomainTrapping(f){
+  if (!f || !f.alive) return null;
+  const tc = CFG[f.type];
+  if (tc && tc.heavenImmuneDomain) return null;        /* 甚尔：结界关不住他 */
+  const foe = (f === player) ? enemy : player;
+  const d = foe && foe.domain;
+  if (!d || !CLOSED_DOMAINS[d.type]) return null;
+  if (!finite(d.r) || d.r < 24) return null;           /* 结界还在成形 */
+  if (dist(f, d) > d.r) return null;                   /* 还没进圈 → 不受约束 */
+  return d;
+}
+
+/* 每帧把被困者夹回结界内部（在结算完所有位移之后调用） */
+function clampClosedDomains(dt){
+  for (const f of [player, enemy]){
+    if (!f) continue;
+    /* 撞墙特效的限流计时（undefined 也要归一成 0，否则下面的 <= 0 判定永远不成立） */
+    f.domWallT = (f.domWallT > 0) ? Math.max(0, f.domWallT - dt) : 0;
+    const d = closedDomainTrapping(f);
+    if (!d) continue;
+    const maxD = Math.max(8, d.r - f.r);               /* 圈内可活动的半径 */
+    const dd = dist(f, d);
+    if (dd <= maxD) continue;
+    const a = Math.atan2(f.y - d.y, f.x - d.x);
+    const nx = clamp(d.x + Math.cos(a) * maxD, f.r, WORLD.w - f.r);
+    const ny = clamp(d.y + Math.sin(a) * maxD, f.r, WORLD.h - f.r);
+    /* 撞墙反馈（限流，避免每帧刷特效） */
+    if (f.domWallT <= 0 && Math.hypot(nx - f.x, ny - f.y) > 0.6){
+      f.domWallT = 0.32;
+      addEffect({ type:'ring', x: d.x + Math.cos(a) * d.r, y: d.y + Math.sin(a) * d.r,
+        t:0, life:0.34, r0:6, r1:34, color: d.type === 'higuruma' ? '#ffd76a' : '#c9a4ff', width:3 });
+    }
+    f.x = nx; f.y = ny;
+  }
+}
+
 function updateDomains(dt){
   for (const f of [player, enemy]){
     if (!f || !f.domain) continue;
@@ -7206,6 +7274,7 @@ window.addEventListener('touchstart', tryLockLandscape, { once: true });
   if (mb) mb.addEventListener('click', e => { e.stopPropagation(); toggleMute(); });
 }
 loadSettings();          /* ★ 先读取设置，音效池按保存的音量创建 */
+setupIosAudioSession();  /* ★ iOS：音频会话设为 ambient，不占用后台/控制中心 */
 preloadSfx();
 updateMuteBtn();
 showMenu();
