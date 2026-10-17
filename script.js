@@ -120,6 +120,12 @@ function sfxGet(file){
       a.volume = SFX_VOL;
       /* ★ 禁止远程/投射播放（AirPlay 等），避免音频被当成媒体接管系统播放 */
       try { a.disableRemotePlayback = true; } catch(_){}
+      /* ★ 解码失败时给出可诊断的日志（例如 iOS 不支持该容器/编码） */
+      try {
+        a.addEventListener('error', () => {
+          if (typeof console !== 'undefined' && console.warn) console.warn('[sfx] 无法加载音效：' + file);
+        });
+      } catch(_){}
       p.list.push(a);
     }
   } catch(_){}
@@ -152,47 +158,68 @@ function playSfx(act, type, vol){
     const a = p.list[p.idx];
     p.idx = (p.idx + 1) % p.list.length;
     a.volume = clamp(SFX_VOL * (vol === undefined ? 1 : vol), 0, 1);
+    a.muted = false;                 /* ★ 预热时副本会被临时静音，正式播放前必须解除 */
     try { a.currentTime = 0; } catch(_){}
     const pr = a.play();
     if (pr && pr.catch) pr.catch(() => {});
   } catch(_){}
 }
 
-/* ★ iOS（Safari 16.4+）：把页面的音频会话类型设为 ambient
-   —— 与其它 App 的音频混音、不接管后台播放、也不会在控制中心里占据「正在播放」
-   —— 不支持 navigator.audioSession 的浏览器直接忽略
-   （若想让音效忽略静音开关，把 'ambient' 换成 'transient'） */
+/* ══════════════════════════════════════════
+   ★ iOS 音频会话（Safari 16.4+ 的 navigator.audioSession）
+   —— 目标：音效照常能听见，但不接管后台播放、不在控制中心占据「正在播放」
+   —— 用 'transient'（短促音效专用）：与其它 App 混音、不占用 Now Playing，
+      且【不会】被侧边静音开关静音
+   ⚠️ 千万不要改回 'ambient'：它虽然也不占控制中心，但会被静音开关彻底静音
+      —— 手机上大多数人开着静音，表现就是「完全没声音」
+   —— 手机端可用 URL 参数快速对比：?audio=transient / playback / ambient / auto
+   ══════════════════════════════════════════ */
+const IOS_AUDIO_SESSION_TYPE = (function(){
+  const ok = { 'auto':1, 'playback':1, 'transient':1, 'transient-solo':1, 'ambient':1, 'play-and-record':1 };
+  const m = /[?&]audio=([a-z-]+)/i.exec((typeof location !== 'undefined' && location.search) || '');
+  const v = m ? m[1].toLowerCase() : '';
+  return ok[v] ? v : 'transient';
+})();
+
 function setupIosAudioSession(){
   try {
     const s = navigator.audioSession;
-    if (s && 'type' in s) s.type = 'ambient';
+    if (s && 'type' in s && s.type !== IOS_AUDIO_SESSION_TYPE) s.type = IOS_AUDIO_SESSION_TYPE;
   } catch(_){}
   /* 顺手清空媒体会话，避免音效被系统当成「正在播放的媒体」 */
   try {
     if (navigator.mediaSession){
       navigator.mediaSession.metadata = null;
-      navigator.mediaSession.playbackState = 'none';
+      if (navigator.mediaSession.playbackState !== 'none') navigator.mediaSession.playbackState = 'none';
     }
   } catch(_){}
 }
 
 /* ★ 首次交互时解锁播放权限（移动端必须由用户手势触发）
-   每个音效只预热第一个副本，避免页面加载时产生大量被中断的请求 */
+   —— iOS 上「没在用户手势里播放过」的 <audio> 元素可能被拒绝播放，
+      所以要把【每个副本】都预热一遍（之前只预热 list[0]，
+      轮转到 list[1] / list[2] 时在 iOS 上会静默失败）
+   —— 分帧、每帧 6 个，避免一次性起播几十个元素卡住主线程 */
 function unlockSfx(){
   if (sfxUnlocked) return;
   sfxUnlocked = true;
   setupIosAudioSession();          /* ★ 手势后再确认一次音频会话类型 */
-  for (const f in sfxPool){
-    const a = sfxPool[f].list[0];
-    if (!a) continue;
-    try {
-      a.muted = true;
-      const pr = a.play();
-      if (pr && pr.then) pr.then(() => { a.pause(); a.muted = false; try { a.currentTime = 0; } catch(_){} })
-                          .catch(() => { a.muted = false; });
-      else a.muted = false;
-    } catch(_){}
-  }
+  const queue = [];
+  for (const f in sfxPool) for (const a of sfxPool[f].list) queue.push(a);
+  const warm = () => {
+    for (let n = 0; n < 6 && queue.length; n++){
+      const a = queue.shift();
+      try {
+        a.muted = true;
+        const done = () => { try { a.pause(); a.currentTime = 0; } catch(_){} a.muted = false; };
+        const pr = a.play();
+        if (pr && pr.then) pr.then(done).catch(() => { a.muted = false; });
+        else done();
+      } catch(_){ try { a.muted = false; } catch(_2){} }
+    }
+    if (queue.length) requestAnimationFrame(warm);
+  };
+  warm();
 }
 
 function updateMuteBtn(){
